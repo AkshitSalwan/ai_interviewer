@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"command": "npm run dev",
+			"group": "build",
+			"isBackground": true,
+			"label": "Start Development Server",
+			"problemMatcher": [
+				"$tsc"
+			],
+			"type": "shell"
+		}
+	]
+}
