@@ -21,7 +21,7 @@ recognition.onresult = async (event) => {
   await TTS(text)
 }
 async function callGemini(text){
-    const API_KEY='AIzaSyAKbKfp2-V5hkLUvZM49VzBDUJBZLkwj5k'; 
+    const API_KEY=''; 
     const body = {
 	  "system_instruction": {
       "parts": [
