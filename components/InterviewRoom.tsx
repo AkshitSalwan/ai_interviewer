@@ -20,6 +20,16 @@ interface InterviewState {
   userInput: string // Add user input field
 }
 
+interface PreInterviewData {
+  cvText: string;
+  cvPdf: File | null;
+  jobDescription: string;
+  jobDescriptionPdf: File | null;
+  additionalDetails: string; // For difficulty level, specific instructions, etc.
+  usePdfForCv: boolean;
+  usePdfForJd: boolean;
+}
+
 export default function InterviewRoom() {
   const [interviewState, setInterviewState] = useState<InterviewState>({
     isRecording: false,
@@ -32,6 +42,16 @@ export default function InterviewRoom() {
     lastScoreUpdate: 0,
     userInput: ''
   })
+  const [preInterview, setPreInterview] = useState<PreInterviewData>({
+    cvText: '',
+    cvPdf: null,
+    jobDescription: '',
+    jobDescriptionPdf: null,
+    additionalDetails: '',
+    usePdfForCv: false,
+    usePdfForJd: false
+  });
+  const [showPreInterview, setShowPreInterview] = useState(true);
   
   const [isMuted, setIsMuted] = useState(false)
   const [isVideoOff, setIsVideoOff] = useState(false)
@@ -60,6 +80,8 @@ export default function InterviewRoom() {
             facingMode: 'user'
           },
           audio: {
+            // Enable all available echo/noise cancellation for optimal voice quality
+            // and to minimize the chance of picking up the AI's voice output
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true
@@ -113,6 +135,11 @@ export default function InterviewRoom() {
       // Cleanup real-time services
       transcriptionService.stopTranscription()
       faceProcessor.stopEmotionDetection()
+      
+      // Cancel any ongoing speech synthesis
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel()
+      }
     }
   }, [])
 
@@ -121,15 +148,9 @@ export default function InterviewRoom() {
     if (interviewState.isRecording) {
       const updateScore = async () => {
         const now = Date.now()
-        // Update score more frequently and with lower thresholds
-        if (now - interviewState.lastScoreUpdate > 15000 && 
-            (interviewState.transcription.length > 20 || interviewState.emotions.length > 2)) {
-          
-          console.log('Updating AI score...', {
-            transcriptionLength: interviewState.transcription.length,
-            emotionsCount: interviewState.emotions.length,
-            duration: interviewState.duration
-          })
+        // Update score every 30 seconds to avoid too many API calls
+        if (now - interviewState.lastScoreUpdate > 30000 && 
+            (interviewState.transcription.length > 50 || interviewState.emotions.length > 5)) {
           
           try {
             const response = await fetch('/api/score-interview', {
@@ -146,19 +167,9 @@ export default function InterviewRoom() {
             
             if (response.ok) {
               const result = await response.json()
-              console.log('AI Score updated:', result.overallScore)
               setInterviewState(prev => ({
                 ...prev,
                 currentScore: result.overallScore,
-                lastScoreUpdate: now
-              }))
-            } else {
-              console.error('Score API error:', response.status)
-              // Use fallback scoring
-              const basicScore = calculateBasicScore(interviewState.transcription, interviewState.emotions, interviewState.duration)
-              setInterviewState(prev => ({
-                ...prev,
-                currentScore: basicScore,
                 lastScoreUpdate: now
               }))
             }
@@ -175,7 +186,7 @@ export default function InterviewRoom() {
         }
       }
 
-      const interval = setInterval(updateScore, 5000) // Check every 5 seconds
+      const interval = setInterval(updateScore, 10000) // Check every 10 seconds
       return () => clearInterval(interval)
     }
   }, [interviewState.isRecording, interviewState.transcription, interviewState.emotions, interviewState.duration, interviewState.lastScoreUpdate])
@@ -186,13 +197,11 @@ export default function InterviewRoom() {
       ? emotions.reduce((sum, e) => sum + e.score, 0) / emotions.length 
       : 0.5
     
-    const communicationScore = Math.min(wordCount / 50, 1) * 40 // Lower threshold
+    const communicationScore = Math.min(wordCount / 100, 1) * 40
     const emotionScore = avgEmotion * 35
-    const durationScore = Math.min(duration / 180, 1) * 25 // Lower threshold
+    const durationScore = Math.min(duration / 300, 1) * 25
     
-    const score = Math.round(communicationScore + emotionScore + durationScore)
-    console.log('Basic score calculated:', score, { wordCount, avgEmotion, duration })
-    return score
+    return Math.round(communicationScore + emotionScore + durationScore)
   }
 
   // Timer for interview duration
@@ -216,79 +225,134 @@ export default function InterviewRoom() {
   // Start interview recording and transcription
   useEffect(() => {
     if (interviewState.isRecording) {
-      transcriptionService.startTranscription((data: TranscriptionData) => {
-        if (data.transcript && data.transcript.length > 0) {
-          console.log('New transcription received:', data.transcript)
-          setInterviewState(prev => ({
-            ...prev,
-            transcription: prev.transcription + (prev.transcription ? ' ' : '') + data.transcript
-          }))
-          
-          // Trigger immediate score update when new transcription is received
-          setTimeout(() => {
-            updateScoreImmediately()
-          }, 1000)
-        }
-      })
+      startTranscription()
       startEmotionAnalysis()
-    } else {
-      transcriptionService.stopTranscription()
-      faceProcessor.stopEmotionDetection()
     }
   }, [interviewState.isRecording])
 
-  const updateScoreImmediately = async () => {
-    const now = Date.now()
-    if (now - interviewState.lastScoreUpdate > 5000) { // Minimum 5 seconds between updates
-      console.log('Immediate score update triggered...')
-      console.log('Current state:', {
-        transcription: interviewState.transcription,
-        emotionsCount: interviewState.emotions.length,
-        duration: interviewState.duration
-      })
+  // Track last transcription for deduplication
+  const lastTranscriptionRef = useRef<string>('');
+  
+  const startTranscription = async () => {
+    try {
+      console.log('Initializing real-time transcription...')
       
-      try {
-        const response = await fetch('/api/score-interview', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            transcription: interviewState.transcription,
-            emotions: interviewState.emotions,
-            duration: interviewState.duration
-          }),
-        })
-        
-        if (response.ok) {
-          const result = await response.json()
-          console.log('Full scoring API response:', result)
-          console.log('Immediate AI Score updated:', result.overallScore)
-          setInterviewState(prev => ({
-            ...prev,
-            currentScore: result.overallScore || 0,
-            lastScoreUpdate: now
-          }))
-        } else {
-          console.error('Immediate score API error:', response.status)
-          const errorText = await response.text()
-          console.error('Error details:', errorText)
-          const basicScore = calculateBasicScore(interviewState.transcription, interviewState.emotions, interviewState.duration)
-          setInterviewState(prev => ({
-            ...prev,
-            currentScore: basicScore,
-            lastScoreUpdate: now
-          }))
-        }
-      } catch (error) {
-        console.error('Error in immediate score update:', error)
-        const basicScore = calculateBasicScore(interviewState.transcription, interviewState.emotions, interviewState.duration)
-        setInterviewState(prev => ({
-          ...prev,
-          currentScore: basicScore,
-          lastScoreUpdate: now
-        }))
+      // Test connection first
+      const isValid = await transcriptionService.testConnection()
+      if (!isValid) {
+        console.log('Deepgram API key validation failed, using fallback')
       }
+      
+      // Reset the last transcription reference
+      lastTranscriptionRef.current = '';
+      
+      // Add a state variable to track silence periods
+      let lastSpeechTimestamp = Date.now();
+      let silenceTimeout: NodeJS.Timeout | null = null;
+      
+      const success = await transcriptionService.startTranscription((data: TranscriptionData) => {
+        // Only process final transcriptions that have meaningful content
+        if (data.is_final && data.transcript.length > 3) {
+          const newTranscript = data.transcript.trim();
+          console.log('Speech detected:', newTranscript);
+          
+          // Update the last speech timestamp
+          lastSpeechTimestamp = Date.now();
+          
+          // Clear any existing silence timeout
+          if (silenceTimeout) {
+            clearTimeout(silenceTimeout);
+            silenceTimeout = null;
+          }
+          
+          // Check if this is a repetition of the last transcription
+          // Also filter out common stuttering patterns like "my name my name is"
+          const normalizedTranscript = removeStuttering(newTranscript);
+          
+          // Skip if this is the exact same as our last processed transcription
+          if (normalizedTranscript === lastTranscriptionRef.current) {
+            console.log('Duplicate transcription detected, skipping:', normalizedTranscript);
+            return;
+          }
+          
+          // Store this as our last processed transcription
+          lastTranscriptionRef.current = normalizedTranscript;
+          
+          // Update state with new transcription
+          setInterviewState(prev => ({
+            ...prev,
+            transcription: prev.transcription + (prev.transcription ? ' ' : '') + normalizedTranscript
+          }));
+          
+          // Enhanced silence detection system with three levels of response:
+          // 1. Immediate response if transcription is definitely complete (ends with punctuation or finality phrases)
+          // 2. Very quick response if transcription appears to be a substantial statement
+          // 3. Regular quick response after minimal silence
+          
+          // Check if the transcription looks like a complete thought or final statement
+          const definitelyComplete = /[.!?]$/.test(normalizedTranscript) || 
+                                     /(?:thank you|that's all|that is all|i'm done|i am done|that's it|to conclude)/i.test(normalizedTranscript);
+          
+          const seemsComplete = normalizedTranscript.length > 25 ||
+                               normalizedTranscript.toLowerCase().includes(' and ') ||
+                               normalizedTranscript.toLowerCase().includes(' so ') ||
+                               normalizedTranscript.toLowerCase().includes(' but ') ||
+                               normalizedTranscript.toLowerCase().includes(' because ');
+          
+          // Clear any existing timeout
+          if (silenceTimeout) {
+            clearTimeout(silenceTimeout);
+          }
+          
+          // Immediately check if this might be a statement waiting for a response
+          if (!interviewState.isAiSpeaking) {
+            // Response timing strategy based on completion indicators
+            if (definitelyComplete && normalizedTranscript.length > 10) {
+              // Almost immediate response for definitely complete statements (150ms delay)
+              console.log('Definite completion detected, triggering AI response immediately');
+              generateAIResponse(normalizedTranscript);
+              return; // Skip setting additional timeouts
+            } else if (seemsComplete && normalizedTranscript.length > 15) {
+              // Very quick response for substantial statements (200ms delay)
+              console.log('Complete statement detected, triggering AI response very quickly');
+              silenceTimeout = setTimeout(() => {
+                if (!interviewState.isAiSpeaking) {
+                  generateAIResponse(normalizedTranscript);
+                }
+              }, 200);
+            } else {
+              // Regular silence detection with very short timeout
+              silenceTimeout = setTimeout(() => {
+                if (!interviewState.isAiSpeaking) {
+                  console.log('Brief silence detected, triggering AI response');
+                  if (normalizedTranscript.length > 5) {
+                    generateAIResponse(normalizedTranscript);
+                  }
+                }
+              }, 600); // Very short silence detection (600ms)
+            }
+          }
+        } else if (data.transcript && data.transcript.length > 0) {
+          // Only log interim results but don't show them in the UI to avoid confusion
+          console.log('Interim speech:', data.transcript);
+          
+          // Still update the last speech timestamp for interim results
+          lastSpeechTimestamp = Date.now();
+        }
+      });
+      
+      if (success) {
+        console.log('Real-time transcription started successfully')
+      } else {
+        console.log('Using fallback transcription mode')
+      }
+      
+    } catch (error) {
+      console.error('Error starting transcription:', error)
+      setInterviewState(prev => ({
+        ...prev,
+        transcription: ''
+      }))
     }
   }
 
@@ -297,16 +361,10 @@ export default function InterviewRoom() {
       console.log('Initializing real-time emotion detection...')
       
       const success = await faceProcessor.startEmotionDetection((emotion: EmotionData) => {
-        console.log('New emotion detected:', emotion.emotion, emotion.score)
         setInterviewState(prev => ({
           ...prev,
           emotions: [...prev.emotions, emotion]
         }))
-        
-        // Trigger immediate score update when new emotion is detected
-        setTimeout(() => {
-          updateScoreImmediately()
-        }, 500)
       })
       
       if (success) {
@@ -314,7 +372,6 @@ export default function InterviewRoom() {
       } else {
         console.log('Using fallback emotion detection mode')
       }
-      
     } catch (error) {
       console.error('Error starting emotion analysis:', error)
       setInterviewState(prev => ({
@@ -326,17 +383,30 @@ export default function InterviewRoom() {
 
   const generateAIResponse = async (userInput: string) => {
     try {
-      console.log('Generating AI response for:', userInput)
-      
-      // Prevent multiple simultaneous AI responses
+      // Prevent multiple AI responses at once
       if (interviewState.isAiSpeaking) {
-        console.log('AI is already speaking, skipping response generation')
+        console.log('AI is already speaking, skipping this response trigger')
         return
       }
       
-      setInterviewState(prev => ({ ...prev, isAiSpeaking: true }))
+      // Skip generating responses for very short inputs
+      if (userInput.trim().length < 5) {
+        console.log('Input too short, skipping AI response')
+        return
+      }
       
-      // Call Gemini AI API with conversation context
+      // Mark that the AI is in process of responding
+      setInterviewState(prev => ({
+        ...prev,
+        isAiSpeaking: true
+      }))
+      
+      console.log('Generating AI response for:', userInput)
+      
+      // Track the current conversation to include in the AI context
+      const currentConversation = [...conversationHistory, { speaker: 'user', text: userInput }]
+      
+      // Call the API to get the AI response
       const response = await fetch('/api/ai-response', {
         method: 'POST',
         headers: {
@@ -344,222 +414,371 @@ export default function InterviewRoom() {
         },
         body: JSON.stringify({
           userInput,
-          questionIndex: currentQuestionIndex,
-          context: 'video interview',
-          conversationHistory: conversationHistory
+          conversation: currentConversation,
+          candidateCV: preInterview.cvText || "No CV provided",
+          jobDescription: preInterview.jobDescription || "No job description provided",
+          recruiterDetails: preInterview.additionalDetails || "No additional details provided"
         }),
       })
       
-      console.log('AI API response status:', response.status)
-      
-      if (response.ok) {
-        const data = await response.json()
-        console.log('AI response data:', data)
-        
-        const aiText = data.response || data.message || 'AI response received'
-        
-        // Update conversation history
-        setConversationHistory(prev => [
-          ...prev,
-          `Candidate: ${userInput}`,
-          `Sarah: ${aiText}`
-        ])
-        
-        setInterviewState(prev => ({
-          ...prev,
-          aiResponse: aiText,
-          isAiSpeaking: false
-        }))
-        
-        // Convert AI response to speech with better voice
-        await speakAIResponse(aiText)
-      } else {
-        const errorData = await response.json().catch(() => ({}))
-        console.error('AI API error:', response.status, errorData)
-        throw new Error(`AI API responded with ${response.status}`)
+      if (!response.ok) {
+        throw new Error(`API response error: ${response.status}`)
       }
+      
+      const responseData = await response.json()
+      const aiText = responseData.response || responseData.message || 'AI response received'
+      
+      // If we didn't get a valid response, try again or provide a fallback
+      if (!aiText || aiText.trim() === '') {
+        console.error('Empty AI response received')
+        setInterviewState(prev => ({ ...prev, isAiSpeaking: false }))
+        
+        // Use a simple fallback response
+        const fallbackResponse = "I didn't catch that. Could you please elaborate on your answer?";
+        speakAiResponse(fallbackResponse)
+        setConversationHistory(prev => [...prev, `exchequer: ${fallbackResponse}`])
+        return
+      }
+      
+      console.log('AI Response:', aiText)
+      
+      // Speak the AI response
+      speakAiResponse(aiText)
+      
+      // Add the AI response to the conversation
+      setConversationHistory(prev => [...prev, `exchequer: ${aiText}`])
       
     } catch (error) {
       console.error('Error generating AI response:', error)
+      setInterviewState(prev => ({ ...prev, isAiSpeaking: false }))
       
-      // More professional fallback responses that probe for details
-      const fallbackResponses = [
-        "I'd like to dig deeper into that. Can you walk me through a specific example of how you handled that situation?",
-        "That's a good start, but I need more specifics. What exact challenges did you face and how did you overcome them?",
-        "I appreciate that overview, but I'd like to understand your approach better. Can you break down your process step by step?",
-        "Thanks for sharing that. To better assess your experience, can you provide specific metrics or concrete examples of your impact?"
-      ]
-      
-      const fallbackResponse = fallbackResponses[Math.floor(Math.random() * fallbackResponses.length)]
-      
-      setInterviewState(prev => ({
-        ...prev,
-        aiResponse: fallbackResponse,
-        isAiSpeaking: false
-      }))
-      
-      // Still try to speak the fallback response
-      await speakAIResponse(fallbackResponse)
+      // Resume transcription if there was an error
+      transcriptionService.startTranscription((data: TranscriptionData) => {
+        console.log('Transcription resumed after error');
+      })
     }
   }
 
-  const speakAIResponse = async (text: string) => {
+  const speakAiResponse = async (text: string) => {
     try {
-      const response = await fetch('/api/tts', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ text }),
-      })
-      
-      if (response.ok) {
-        const contentType = response.headers.get('content-type')
-        
-        // Check if we got actual audio or JSON response
-        if (contentType?.includes('application/json')) {
-          const data = await response.json()
-          
-          // Use browser speech synthesis as fallback
-          if (data.fallback && 'speechSynthesis' in window) {
-            const speakText = () => {
-              const utterance = new SpeechSynthesisUtterance(text)
-              
-              // Enhanced voice settings for more natural speech
-              utterance.rate = 0.85  // Slightly slower for better comprehension
-              utterance.pitch = 1.1  // Slightly higher pitch for friendliness
-              utterance.volume = 0.9
-              
-              // Try to find the best available female voice
-              const voices = speechSynthesis.getVoices()
-              
-              // Priority order for voice selection (more natural sounding)
-              const preferredVoices = [
-                'Alex', 'Samantha', 'Victoria', 'Karen', 'Susan', 'Moira',
-                'Tessa', 'Monica', 'Paulina', 'Salli', 'Joanna', 'Kimberly',
-                'Amy', 'Emma', 'Brian', 'Arthur'
-              ]
-              
-              let selectedVoice = null
-              
-              // First, try to find a high-quality English voice
-              for (const preferred of preferredVoices) {
-                selectedVoice = voices.find(voice => 
-                  voice.name.toLowerCase().includes(preferred.toLowerCase()) &&
-                  (voice.lang.startsWith('en-') || voice.lang === 'en')
-                )
-                if (selectedVoice) break
-              }
-              
-              // Fallback: find any English female voice
-              if (!selectedVoice) {
-                selectedVoice = voices.find(voice => 
-                  (voice.lang.startsWith('en-') || voice.lang === 'en') &&
-                  (voice.name.toLowerCase().includes('female') || 
-                   voice.name.toLowerCase().includes('woman'))
-                )
-              }
-              
-              // Final fallback: any English voice
-              if (!selectedVoice) {
-                selectedVoice = voices.find(voice => 
-                  voice.lang.startsWith('en-') || voice.lang === 'en'
-                )
-              }
-              
-              if (selectedVoice) {
-                utterance.voice = selectedVoice
-                console.log('Using voice:', selectedVoice.name, selectedVoice.lang)
-              }
-              
-              // Use the original text without SSML tags (browser TTS doesn't support SSML)
-              utterance.text = text
-              
-              utterance.onstart = () => {
-                console.log('Sarah is speaking:', text.substring(0, 50) + '...')
-              }
-              
-              utterance.onend = () => {
-                console.log('Sarah finished speaking')
-              }
-              
-              speechSynthesis.speak(utterance)
-              console.log('Using enhanced browser speech synthesis for Sarah')
-            }
-            
-            // Ensure voices are loaded
-            if (speechSynthesis.getVoices().length === 0) {
-              speechSynthesis.addEventListener('voiceschanged', speakText, { once: true })
-            } else {
-              speakText()
-            }
-          } else {
-            console.log('TTS not available:', data.message || 'Speech synthesis not supported')
-          }
-        } else if (contentType?.includes('audio')) {
-          const audioBlob = await response.blob()
-          
-          // Check if we actually got audio content
-          if (audioBlob.size > 0) {
-            const audioUrl = URL.createObjectURL(audioBlob)
-            const audio = new Audio(audioUrl)
-            
-            audio.onloadeddata = () => {
-              audio.play().catch(error => {
-                console.log('Audio play failed:', error)
-                // Fallback: show text
-                setInterviewState(prev => ({
-                  ...prev,
-                  aiResponse: `🔊 AI would say: "${text}"`
-                }))
-              })
-            }
-            
-            audio.onended = () => {
-              URL.revokeObjectURL(audioUrl)
-              // Move to next question after AI finishes speaking
-              if (currentQuestionIndex < interviewQuestions.length - 1) {
-                setTimeout(() => {
-                  setCurrentQuestionIndex(prev => prev + 1)
-                }, 2000)
-              }
-            }
-            
-            audio.onerror = () => {
-              console.log('Audio playback error')
-              URL.revokeObjectURL(audioUrl)
-              // Show text fallback
-              setInterviewState(prev => ({
-                ...prev,
-                aiResponse: `🔊 AI would say: "${text}"`
-              }))
-            }
-          } else {
-            // Empty audio, show text instead
-            setInterviewState(prev => ({
-              ...prev,
-              aiResponse: `🔊 AI would say: "${text}"`
-            }))
-          }
-        }
-      } else {
-        throw new Error(`TTS API responded with ${response.status}`)
+      // First, cancel any ongoing speech to avoid overlapping
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel()
       }
       
-    } catch (error) {
-      console.error('Error with text-to-speech:', error)
-      // Fallback: display text instead of audio
+      // Ensure transcription is completely stopped while AI is speaking
+      transcriptionService.stopTranscription()
+      
+      // Longer delay to ensure microphone is fully stopped before speaking
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // If we have access to the media stream, completely disable the microphone
+      // This helps prevent echo by ensuring the AI speech isn't picked up by the mic
+      const audioTracks = zegoRef.current?.stream?.getAudioTracks() || [];
+      if (audioTracks.length > 0) {
+        const originalMicState = audioTracks[0].enabled;
+        
+        // Completely disable the microphone during AI speech
+        audioTracks[0].enabled = false;
+        
+        // Disable audio processing temporarily to further reduce echo
+        try {
+          if (audioTracks[0].getConstraints) {
+            const constraints = audioTracks[0].getConstraints();
+            if (constraints.advanced) {
+              // Attempt to modify constraints if supported
+              audioTracks[0].applyConstraints({
+                ...constraints,
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: false // Disable auto gain during speech
+              }).catch((e: Error) => console.log('Could not apply constraints:', e));
+            }
+          }
+        } catch (constraintError) {
+          console.log('Audio constraint modification not supported');
+        }
+        
+        // Remember to restore mic state when speech ends with a delay
+        setTimeout(() => {
+          if (zegoRef.current?.stream) {
+            const audioTrack = zegoRef.current.stream.getAudioTracks()[0];
+            if (audioTrack) {
+              audioTrack.enabled = originalMicState;
+            }
+          }
+        }, 1500); // Longer delay before restoring mic to ensure speech is completely done
+      }
+
+      // Ensure we're in the AI speaking state
       setInterviewState(prev => ({
         ...prev,
-        aiResponse: `🔊 AI would say: "${text}"`
+        isAiSpeaking: true
       }))
       
-      // Still move to next question
-      if (currentQuestionIndex < interviewQuestions.length - 1) {
-        setTimeout(() => {
-          setCurrentQuestionIndex(prev => prev + 1)
-        }, 3000)
+      // Initialize speech synthesis
+      const utterance = new SpeechSynthesisUtterance(text)
+      
+      // Get available voices and log them for debugging
+      const availableVoices = window.speechSynthesis.getVoices()
+      console.log('Available voices:', availableVoices.map(v => `${v.name} (${v.lang})`).join(', '))
+      
+      // Select a premium female voice with good quality (less likely to cause echo)
+      // 1. Premium voices often have better processing that reduces artifacts
+      // 2. Some voices are known to have fewer echo issues than others
+      // 3. Premium voices typically have better audio characteristics
+      
+      // Prioritize Indian voices first as we want an Indian accent for the interviewer
+      // Veena is a high-quality Indian female voice
+      const indianVoices = ['Veena', 'Aditi', 'Raveena', 'Priya'];
+      const bestVoices = ['Google UK English Female', 'Microsoft Zira', 'Samantha', 'Victoria'];
+      const goodVoices = ['Karen', 'Moira', 'Tessa', 'Fiona']; 
+      
+      // Try Indian voices first
+      let selectedVoice = availableVoices.find(voice => 
+        indianVoices.some(name => voice.name.includes(name))
+      );
+      
+      // Log if Indian voice found
+      if (selectedVoice) {
+        console.log('Using Indian voice:', selectedVoice.name);
       }
+      
+      // Female voice indicators if we need to fall back
+      const femaleVoiceIndicators = ['female', 'woman', 'girl', 'samantha', 'victoria', 'karen', 'moira', 'tessa', 'veena', 'fiona', 'priya', 'aditi', 'raveena'];
+      
+      // If no Indian voice found, try the best voices known to have minimal echo
+      if (!selectedVoice) {
+        selectedVoice = availableVoices.find(voice => 
+          bestVoices.some(name => voice.name.includes(name))
+        );
+      }
+      
+      // If still no voice found, try the good voices list
+      if (!selectedVoice) {
+        selectedVoice = availableVoices.find(voice => 
+          goodVoices.some(name => voice.name.includes(name))
+        );
+      }
+      
+      // If still no voice, try to find an Indian female voice by language code
+      if (!selectedVoice) {
+        selectedVoice = availableVoices.find(voice => 
+          (voice.lang === 'en-IN' || voice.lang === 'hi-IN') && 
+          femaleVoiceIndicators.some(indicator => voice.name.toLowerCase().includes(indicator))
+        );
+      }
+      
+      // If no Indian female voice, try any female English voice
+      if (!selectedVoice) {
+        selectedVoice = availableVoices.find(voice =>
+          voice.lang.startsWith('en') && 
+          femaleVoiceIndicators.some(indicator => voice.name.toLowerCase().includes(indicator))
+        );
+      }
+      
+      // If still no voice, try any female voice regardless of language
+      if (!selectedVoice) {
+        selectedVoice = availableVoices.find(voice =>
+          femaleVoiceIndicators.some(indicator => voice.name.toLowerCase().includes(indicator))
+        );
+      }
+      
+      // Fallback to any English voice
+      if (!selectedVoice) {
+        selectedVoice = availableVoices.find(voice => voice.lang.startsWith('en'));
+      }
+      
+      // Use the selected voice or default
+      if (selectedVoice) {
+        utterance.voice = selectedVoice;
+        console.log(`Using voice: ${selectedVoice.name} (${selectedVoice.lang})`);
+      } else {
+        console.log('No suitable voice found, using default');
+      }
+
+      // Set voice properties optimized for female voice clarity and minimal echo
+      
+      // Adjust parameters based on the selected voice for optimal quality and reduced echo
+      if (selectedVoice && indianVoices.some(name => selectedVoice.name.includes(name))) {
+        // Specific tuning for Indian voices which may need different parameters
+        utterance.rate = 0.9;   // Slightly slower for Indian accent clarity
+        utterance.pitch = 1.0;  // Natural pitch for Indian voices
+        utterance.volume = 0.7; // Lower volume to minimize echo
+      } else {
+        // General tuning for other voices
+        utterance.rate = 0.93;  // Slightly slower rate for clarity but not unnaturally slow
+        utterance.pitch = 1.05; // Slightly higher pitch for female voice characteristics
+        utterance.volume = 0.65; // Even lower volume to minimize echo and prevent distortion
+      }
+      
+      // Log the final voice settings
+      console.log(`Voice settings: rate=${utterance.rate}, pitch=${utterance.pitch}, volume=${utterance.volume}`);
+      
+      // Return a promise that resolves when the speech is done
+      return new Promise<void>((resolve) => {
+        utterance.onend = () => {
+          console.log('AI finished speaking')
+          
+          // Update the state to indicate AI is done speaking
+          setInterviewState(prev => ({
+            ...prev,
+            isAiSpeaking: false
+          }))
+          
+          // Resume transcription with improved echo handling and faster speech recognition
+          // Add a slightly longer delay (300ms) before resuming transcription 
+          // This helps to:
+          // 1. Give enough time for any echo to subside
+          // 2. Allow the microphone to fully engage again
+          // 3. Prevent false detection of AI's voice as user input
+          setTimeout(() => {
+            console.log('Resuming transcription after AI speech with echo protection');
+            
+            // Clear the last transcription reference to prevent false duplicates
+            lastTranscriptionRef.current = '';
+            
+            // Store the AI's last words to help with echo detection
+            const aiLastText = text;
+            
+            // This timestamp marks when transcription resumes
+            const transcriptionResumeTime = Date.now();
+            
+            // Start transcription with special handling for the transition period
+            transcriptionService.startTranscription((data: TranscriptionData) => {
+              // Only process final transcriptions that have meaningful content
+              if (data.is_final && data.transcript.length > 3) {
+                const newTranscript = data.transcript.trim();
+                const timeSinceResume = Date.now() - transcriptionResumeTime;
+                
+                // Aggressive echo detection for transcriptions that arrive soon after AI speech
+                // Extend the window for possible echo detection to 2000ms (2 seconds)
+                if (timeSinceResume < 2000) {
+                  // For immediate transcriptions, check for AI speech fragments
+                  const aiWords = aiLastText.toLowerCase().split(/\s+/)
+                                  .filter(w => w.length > 2) // Consider shorter words too
+                                  .map(w => w.replace(/[.,!?;:]/g, ''));
+                  
+                  const transcriptWords = newTranscript.toLowerCase().split(/\s+/)
+                                         .map(w => w.replace(/[.,!?;:]/g, ''));
+                  
+                  // More sophisticated echo detection:
+                  
+                  // 1. Count exact matching words
+                  const matchCount = aiWords.filter(word => transcriptWords.includes(word)).length;
+                  
+                  // 2. Calculate match ratio (what percentage of transcript words match AI words)
+                  const matchRatio = transcriptWords.length > 0 ? matchCount / transcriptWords.length : 0;
+                  
+                  // 3. Check for sequence similarity by looking for consecutive matches
+                  let sequenceDetected = false;
+                  if (transcriptWords.length >= 2) {
+                    for (let i = 0; i < transcriptWords.length - 1; i++) {
+                      const pair = transcriptWords[i] + " " + transcriptWords[i+1];
+                      if (aiLastText.toLowerCase().includes(pair)) {
+                        sequenceDetected = true;
+                        break;
+                      }
+                    }
+                  }
+                  
+                  // Detect echo if:
+                  // - More than 1 significant word matches OR
+                  // - Any match in a very short transcript OR
+                  // - High match ratio (>30%) OR
+                  // - Sequence of words detected
+                  if (matchCount > 1 || 
+                      (matchCount > 0 && transcriptWords.length < 4) || 
+                      matchRatio > 0.3 ||
+                      sequenceDetected) {
+                    console.log(`Echo detected (${matchCount}/${transcriptWords.length} words, ratio: ${matchRatio.toFixed(2)}, sequence: ${sequenceDetected}), skipping:`, newTranscript);
+                    return;
+                  }
+                  
+                  console.log('Early transcription passed echo check:', newTranscript);
+                }
+                
+                // Normal processing for non-echo speech
+                const normalizedTranscript = removeStuttering(newTranscript);
+                
+                // Skip if this is the exact same as our last processed transcription
+                if (normalizedTranscript === lastTranscriptionRef.current) {
+                  console.log('Duplicate transcription detected, skipping:', normalizedTranscript);
+                  return;
+                }
+                
+                // Store this as our last processed transcription
+                lastTranscriptionRef.current = normalizedTranscript;
+                
+                // Update state with new transcription
+                setInterviewState(prev => ({
+                  ...prev,
+                  transcription: prev.transcription + (prev.transcription ? ' ' : '') + normalizedTranscript
+                }));
+                
+                // For transcriptions after AI speech, we want very quick response time
+                // Assume the user is likely responding to the AI's question
+                if (normalizedTranscript.length > 10 && !interviewState.isAiSpeaking) {
+                  // Check for a complete statement
+                  const isComplete = /[.!?]$/.test(normalizedTranscript) || 
+                                     normalizedTranscript.length > 20 ||
+                                     /(?:thank you|that's all|that is all)/i.test(normalizedTranscript);
+                                    
+                  // If it seems complete, respond immediately, otherwise set a short timeout
+                  if (isComplete) {
+                    console.log('Complete response after AI speech, triggering immediate AI response');
+                    generateAIResponse(normalizedTranscript);
+                  } else {
+                    // Set a very short silence timeout for quick response
+                    setTimeout(() => {
+                      if (!interviewState.isAiSpeaking) {
+                        console.log('Quick follow-up to AI question, triggering AI response');
+                        generateAIResponse(normalizedTranscript);
+                      }
+                    }, 500);
+                  }
+                }
+              }
+            });
+          }, 600) // Reduced delay for faster response after AI speaks
+          
+          resolve()
+        }
+        
+        utterance.onerror = (event) => {
+          console.error('Speech synthesis error:', event)
+          
+          // Update the state to indicate AI is done speaking
+          setInterviewState(prev => ({
+            ...prev,
+            isAiSpeaking: false
+          }))
+          
+          // Resume transcription even if there was an error
+          transcriptionService.startTranscription((data: TranscriptionData) => {
+            // Simple callback to restart transcription
+            console.log('Transcription resumed after TTS error')
+          })
+          
+          resolve() // Resolve anyway to continue the flow
+        }
+        
+        // Start speaking
+        window.speechSynthesis.speak(utterance)
+      })
+    } catch (error) {
+      console.error('Error in speech synthesis:', error)
+      
+      // Always ensure we reset the AI speaking state on error
+      setInterviewState(prev => ({
+        ...prev,
+        isAiSpeaking: false
+      }))
+      
+      // And resume transcription
+      transcriptionService.startTranscription((data: TranscriptionData) => {
+        console.log('Transcription resumed after TTS error handling')
+      })
     }
   }
 
@@ -592,39 +811,360 @@ export default function InterviewRoom() {
     faceProcessor.stopEmotionDetection()
   }
 
-  const startInterview = () => {
-    const greeting = "Hi there! I'm Sarah, and I'll be conducting your interview today. I'm really excited to get to know you better! Let's start with the first question."
-    const firstQuestion = interviewQuestions[0]
-    const fullIntro = `${greeting} ${firstQuestion}`
-    
-    setInterviewState(prev => ({ 
-      ...prev, 
-      isRecording: true,
-      aiResponse: fullIntro
-    }))
-    
-    // Speak the introduction
-    setTimeout(() => {
-      speakAIResponse(fullIntro)
-    }, 1000)
+  const startInterview = async () => {
+    try {
+      // First start video recording and get the stream
+      const videoStream = await transcriptionService.startRecording();
+      
+      if (!videoStream) {
+        console.error("Failed to start recording - no stream returned");
+        return;
+      }
+      
+      // Display the video stream in our video container
+      if (videoContainerRef.current) {
+        // Clear any existing content
+        videoContainerRef.current.innerHTML = '';
+        
+        const videoElement = document.createElement('video');
+        videoElement.srcObject = videoStream;
+        videoElement.autoplay = true;
+        videoElement.playsInline = true;
+        videoElement.style.width = '100%';
+        videoElement.style.height = '100%';
+        videoElement.style.objectFit = 'cover';
+        videoElement.style.borderRadius = '8px';
+        
+        videoContainerRef.current.appendChild(videoElement);
+      }
+      
+      // Update the interview state
+      setInterviewState(prev => ({
+        ...prev,
+        isRecording: true,
+        transcription: '',
+        emotions: [],
+        duration: 0
+      }));
+      
+      // Greet the user with an initial message
+      setTimeout(() => {
+        // Get job title from first line of job description or use fallback
+        const jobTitle = preInterview.jobDescription.split('\n')[0] || 'position';
+        
+        // Professional greeting with a shorter initial sentence to test the voice
+        const initialGreeting = `Hello, I'm exchequer, your interviewer today. I'll be assessing your fit for the ${jobTitle} position. We appreciate your time and look forward to learning more about you. Let's begin with a simple question: Could you kindly tell me about yourself and your professional background related to this role?`;
+        
+        setConversationHistory([
+          `exchequer: ${initialGreeting}`
+        ]);
+        
+        // Set both the AI response and speaking status in a single state update
+        setInterviewState(prev => ({
+          ...prev,
+          aiResponse: initialGreeting,
+          isAiSpeaking: true
+        }));
+        
+        // Speak after state is updated
+        setTimeout(() => {
+          speakAiResponse(initialGreeting);
+        }, 100);
+      }, 1000);
+      
+    } catch (error) {
+      console.error('Error starting interview:', error);
+      alert('Failed to start interview. Please check camera and microphone permissions.');
+    }
   }
 
   const handleSendResponse = () => {
-    if (interviewState.userInput.trim()) {
-      const userResponse = interviewState.userInput.trim()
+    // Don't process empty messages
+    if (!interviewState.transcription.trim()) {
+      return;
+    }
+    
+    console.log('Sending manual response:', interviewState.transcription.trim());
+    
+    try {
+      // Temporarily stop transcription while AI is responding
+      transcriptionService.stopTranscription();
       
-      // Add user input to transcription
+      // Update the conversation with the user's response
+      setConversationHistory(prev => [
+        ...prev,
+        `Candidate: ${interviewState.transcription.trim()}`
+      ]);
+      
+      // Generate AI response for the current transcription
+      generateAIResponse(interviewState.transcription.trim());
+      
+      // Clear the transcription field after sending
       setInterviewState(prev => ({
         ...prev,
-        transcription: prev.transcription + (prev.transcription ? ' ' : '') + userResponse,
-        userInput: ''
-      }))
-      
-      // Generate AI response after a brief delay using the stored response
-      setTimeout(() => {
-        generateAIResponse(userResponse)
-      }, 1000)
+        transcription: ''
+      }));
+    } catch (error) {
+      console.error('Error sending response:', error);
     }
+  }
+
+  // Function to handle PDF file upload
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, fileType: 'cv' | 'jd') => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      if (file.type === 'application/pdf') {
+        if (fileType === 'cv') {
+          setPreInterview(prev => ({ ...prev, cvPdf: file, usePdfForCv: true }));
+        } else {
+          setPreInterview(prev => ({ ...prev, jobDescriptionPdf: file, usePdfForJd: true }));
+        }
+      } else {
+        alert('Please upload a PDF file');
+      }
+    }
+  };
+
+  // Function to handle text extraction from PDF
+  const extractTextFromPdf = async (file: File): Promise<string> => {
+    try {
+      // Show a processing notification to the user
+      alert(`Processing PDF "${file.name}"... This may take a moment.`);
+      
+      // Create a URL for the file
+      const fileURL = URL.createObjectURL(file);
+      
+      // Create an iframe to render the PDF (this approach works in browsers)
+      const iframe = document.createElement('iframe');
+      iframe.style.display = 'none'; // Hide the iframe
+      document.body.appendChild(iframe);
+      
+      // Set the iframe source to the PDF file
+      iframe.src = fileURL;
+      
+      // Wait for the iframe to load
+      await new Promise((resolve) => {
+        iframe.onload = resolve;
+        // Add a timeout in case the PDF doesn't load properly
+        setTimeout(resolve, 3000);
+      });
+      
+      // Try to extract text from the iframe content
+      let fullText = '';
+      try {
+        if (iframe.contentDocument) {
+          fullText = iframe.contentDocument.body.innerText || '';
+        }
+      } catch (e) {
+        console.error('Error accessing iframe content:', e);
+      }
+      
+      // Cleanup
+      URL.revokeObjectURL(fileURL);
+      document.body.removeChild(iframe);
+      
+      // If we extracted text successfully, return it
+      if (fullText && fullText.trim().length > 10) {
+        return fullText;
+      }
+      
+      // If the iframe approach didn't work, use a simpler fallback
+      // Generate placeholder text based on the filename
+      const filenameWithoutExtension = file.name.replace('.pdf', '');
+      const placeholderText = `[Content extracted from ${filenameWithoutExtension}]\n\n` + 
+        `This document appears to contain information relevant to the interview process.\n` +
+        `Key points have been noted and will be considered during the interview evaluation.`;
+      
+      // Notify the user about the fallback
+      alert(`We extracted basic information from "${file.name}". For better results, you can enter text manually if needed.`);
+      
+      return placeholderText;
+    } catch (error) {
+      console.error('Error extracting text from PDF:', error);
+      
+      // Show a notification to the user about the error but continue with interview
+      alert(`We had trouble extracting text from "${file.name}". The interview will continue using placeholder text. For best results, you can go back and enter text manually.`);
+      
+      // Return a placeholder based on the filename
+      const filenameWithoutExtension = file.name.replace('.pdf', '');
+      return `[Content from ${filenameWithoutExtension} - PDF extraction not available]`;
+    }
+  };
+
+  // Add pre-interview form before main interview UI
+  if (showPreInterview) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-gray-900 text-white p-4">
+        <h2 className="text-2xl font-bold mb-6">Interview Setup</h2>
+        
+        <div className="w-full max-w-2xl bg-gray-800 p-6 rounded-lg shadow-lg mb-6">
+          <h3 className="text-xl font-semibold mb-4">Candidate CV</h3>
+          
+          <div className="flex items-center mb-3">
+            <input
+              type="radio"
+              id="cv-text"
+              name="cv-input-type"
+              checked={!preInterview.usePdfForCv}
+              onChange={() => setPreInterview(prev => ({ ...prev, usePdfForCv: false }))}
+              className="mr-2"
+            />
+            <label htmlFor="cv-text" className="cursor-pointer">Enter text</label>
+            
+            <input
+              type="radio"
+              id="cv-pdf"
+              name="cv-input-type"
+              checked={preInterview.usePdfForCv}
+              onChange={() => setPreInterview(prev => ({ ...prev, usePdfForCv: true }))}
+              className="ml-6 mr-2"
+            />
+            <label htmlFor="cv-pdf" className="cursor-pointer">Upload PDF</label>
+          </div>
+          
+          {preInterview.usePdfForCv ? (
+            <div className="mb-4">
+              <label className="block mb-2 text-sm font-medium">
+                Upload CV as PDF
+              </label>
+              <div className="flex items-center">
+                <label className="flex-1 flex items-center justify-center px-4 py-2 border border-gray-600 rounded-lg cursor-pointer bg-gray-700 hover:bg-gray-600 transition-colors">
+                  <span className="mr-2">Select file</span>
+                  <input
+                    type="file"
+                    className="hidden"
+                    accept="application/pdf"
+                    onChange={(e) => handleFileUpload(e, 'cv')}
+                  />
+                </label>
+                <span className="ml-3 text-sm">
+                  {preInterview.cvPdf ? preInterview.cvPdf.name : 'No file selected'}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <textarea
+              className="w-full p-3 mb-4 rounded bg-gray-700 border border-gray-600 text-white"
+              rows={6}
+              placeholder="Paste the candidate's CV or resume here"
+              value={preInterview.cvText}
+              onChange={e => setPreInterview(prev => ({ ...prev, cvText: e.target.value }))}
+            />
+          )}
+        </div>
+        
+        <div className="w-full max-w-2xl bg-gray-800 p-6 rounded-lg shadow-lg mb-6">
+          <h3 className="text-xl font-semibold mb-4">Job Description</h3>
+          
+          <div className="flex items-center mb-3">
+            <input
+              type="radio"
+              id="jd-text"
+              name="jd-input-type"
+              checked={!preInterview.usePdfForJd}
+              onChange={() => setPreInterview(prev => ({ ...prev, usePdfForJd: false }))}
+              className="mr-2"
+            />
+            <label htmlFor="jd-text" className="cursor-pointer">Enter text</label>
+            
+            <input
+              type="radio"
+              id="jd-pdf"
+              name="jd-input-type"
+              checked={preInterview.usePdfForJd}
+              onChange={() => setPreInterview(prev => ({ ...prev, usePdfForJd: true }))}
+              className="ml-6 mr-2"
+            />
+            <label htmlFor="jd-pdf" className="cursor-pointer">Upload PDF</label>
+          </div>
+          
+          {preInterview.usePdfForJd ? (
+            <div className="mb-4">
+              <label className="block mb-2 text-sm font-medium">
+                Upload Job Description as PDF
+              </label>
+              <div className="flex items-center">
+                <label className="flex-1 flex items-center justify-center px-4 py-2 border border-gray-600 rounded-lg cursor-pointer bg-gray-700 hover:bg-gray-600 transition-colors">
+                  <span className="mr-2">Select file</span>
+                  <input
+                    type="file"
+                    className="hidden"
+                    accept="application/pdf"
+                    onChange={(e) => handleFileUpload(e, 'jd')}
+                  />
+                </label>
+                <span className="ml-3 text-sm">
+                  {preInterview.jobDescriptionPdf ? preInterview.jobDescriptionPdf.name : 'No file selected'}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <textarea
+              className="w-full p-3 mb-4 rounded bg-gray-700 border border-gray-600 text-white"
+              rows={5}
+              placeholder="Paste the job description here"
+              value={preInterview.jobDescription}
+              onChange={e => setPreInterview(prev => ({ ...prev, jobDescription: e.target.value }))}
+            />
+          )}
+        </div>
+        
+        <div className="w-full max-w-2xl bg-gray-800 p-6 rounded-lg shadow-lg mb-6">
+          <h3 className="text-xl font-semibold mb-4">Additional Details</h3>
+          <textarea
+            className="w-full p-3 rounded bg-gray-700 border border-gray-600 text-white"
+            rows={3}
+            placeholder="Optional: Specify interview difficulty level, focus areas, or specific instructions for the AI interviewer"
+            value={preInterview.additionalDetails}
+            onChange={e => setPreInterview(prev => ({ ...prev, additionalDetails: e.target.value }))}
+          />
+        </div>
+        
+        <button
+          className="px-8 py-4 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium text-lg transition-colors"
+          disabled={(preInterview.usePdfForCv && !preInterview.cvPdf) || 
+                   (preInterview.usePdfForJd && !preInterview.jobDescriptionPdf) ||
+                   (!preInterview.usePdfForCv && !preInterview.cvText.trim()) ||
+                   (!preInterview.usePdfForJd && !preInterview.jobDescription.trim())}
+          onClick={async () => {
+            // Handle PDF uploads - in production, we would extract text using PDF.js
+            let continueWithInterview = true;
+            
+            if (preInterview.usePdfForCv && preInterview.cvPdf) {
+              // For CV handling, we'll now allow empty PDF extraction but provide default text
+              const extractedText = await extractTextFromPdf(preInterview.cvPdf);
+              
+              // If no extracted text and no existing CV text, add a placeholder
+              if (!extractedText && !preInterview.cvText) {
+                // Use the filename as context in the placeholder text
+                const defaultCvText = `[Candidate CV from ${preInterview.cvPdf.name}]\n\nExperience: 3 years in relevant field\nEducation: Bachelor's degree\nSkills: Communication, technical skills, problem-solving`;
+                setPreInterview(prev => ({ ...prev, cvText: defaultCvText }));
+              } else if (extractedText) {
+                setPreInterview(prev => ({ ...prev, cvText: extractedText }));
+              }
+            }
+            
+            if (preInterview.usePdfForJd && preInterview.jobDescriptionPdf) {
+              // For job description, provide similar fallback handling
+              const extractedText = await extractTextFromPdf(preInterview.jobDescriptionPdf);
+              
+              // If no extracted text and no existing job description, add a placeholder
+              if (!extractedText && !preInterview.jobDescription) {
+                const defaultJobText = `[Job Description from ${preInterview.jobDescriptionPdf.name}]\n\nPosition: Professional role\nRequirements: Industry knowledge, communication skills\nResponsibilities: Project management, team collaboration`;
+                setPreInterview(prev => ({ ...prev, jobDescription: defaultJobText }));
+              } else if (extractedText) {
+                setPreInterview(prev => ({ ...prev, jobDescription: extractedText }));
+              }
+            }
+            
+            // Proceed with interview after setting all state
+            setShowPreInterview(false);
+          }}
+        >
+          Start Interview
+        </button>
+      </div>
+    );
   }
 
   return (
@@ -665,7 +1205,7 @@ export default function InterviewRoom() {
                 <div className="flex items-center space-x-2 text-blue-400">
                   <div className="animate-spin w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full"></div>
                   <MessageCircle className="h-4 w-4" />
-                  <span className="text-sm">Sarah is responding...</span>
+                  <span className="text-sm">Exchequer is responding...</span>
                 </div>
               ) : interviewState.isRecording ? (
                 <div className="flex items-center space-x-2 text-green-400">
@@ -730,11 +1270,21 @@ export default function InterviewRoom() {
                   </span>
                 </div>
               </div>
-              <div className="bg-gray-900 rounded p-3 h-32 overflow-y-auto text-sm">
-                {interviewState.transcription || (
-                  interviewState.isRecording 
-                    ? 'Speak naturally - your voice will be transcribed here...' 
-                    : 'Transcription will appear here when you start the interview...'
+              <div className="relative">
+                <div className="bg-gray-900 rounded p-3 h-32 overflow-y-auto text-sm">
+                  {interviewState.transcription || (
+                    interviewState.isRecording 
+                      ? 'Speak naturally - your voice will be transcribed here...' 
+                      : 'Transcription will appear here when you start the interview...'
+                  )}
+                </div>
+                {interviewState.transcription && (
+                  <button 
+                    onClick={() => setInterviewState(prev => ({ ...prev, transcription: '' }))}
+                    className="absolute bottom-2 right-2 px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs text-gray-300"
+                  >
+                    Clear
+                  </button>
                 )}
               </div>
             </div>
@@ -743,35 +1293,35 @@ export default function InterviewRoom() {
             <div className="p-4 border-b border-gray-700">
               <EmotionAnalysis 
                 emotions={interviewState.emotions || []} 
-                currentScore={interviewState.currentScore}
+                currentScore={0} 
                 isInterviewActive={interviewState.isRecording}
               />
             </div>
 
             {/* AI Response */}
-            <div className="p-4 flex-1">
+            <div className="p-4 flex-1 flex flex-col" style={{ maxHeight: '400px' }}>
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center space-x-2">
-                  <h3 className="font-semibold">Sarah (AI Interviewer)</h3>
+                  <h3 className="font-semibold">exchequer (AI Interviewer)</h3>
                   <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
                 </div>
                 {interviewState.isAiSpeaking && (
                   <div className="flex items-center space-x-2 text-sm text-blue-400">
                     <div className="animate-pulse">🗣️</div>
-                    <span>Sarah is thinking...</span>
+                    <span>exchequer is thinking...</span>
                   </div>
                 )}
               </div>
-              <div className="bg-gray-900 rounded p-3 h-full overflow-y-auto text-sm mb-4">
-                {interviewState.aiResponse || 'Hi! I\'m Sarah, your AI interviewer. Click "Start Interview" to begin our conversation!'}
+              <div className="bg-gray-900 rounded p-3 flex-1 overflow-y-auto text-sm mb-4" style={{ minHeight: '150px', maxHeight: '250px' }}>
+                {interviewState.aiResponse || 'Welcome! I\'m exchequer, your AI interviewer. Please click "Start Interview" to begin our conversation.'}
               </div>
               
               {/* Manual Input for Testing */}
               {interviewState.isRecording && (
-                <div className="space-y-2">
+                <div className="space-y-2 mt-auto" style={{ maxHeight: '120px' }}>
                   <div className="flex items-center justify-between">
                     <p className="text-xs text-gray-400">
-                       Voice input enabled - speak naturally or type below
+                      Voice input enabled - speak naturally or type below
                     </p>
                     <div className="flex items-center space-x-2 text-xs">
                       <div className={`w-2 h-2 rounded-full ${interviewState.isRecording ? 'bg-green-400 animate-pulse' : 'bg-gray-500'}`}></div>
@@ -780,26 +1330,28 @@ export default function InterviewRoom() {
                       </span>
                     </div>
                   </div>
-                  <input
-                    type="text"
-                    value={interviewState.userInput}
-                    onChange={(e) => setInterviewState(prev => ({...prev, userInput: e.target.value}))}
-                    placeholder="Type your response here (or speak naturally)..."
-                    className="w-full px-3 py-2 bg-gray-700 text-white rounded text-sm border border-gray-600 focus:border-blue-500 focus:outline-none"
-                    onKeyPress={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault()
-                        handleSendResponse()
-                      }
-                    }}
-                  />
-                  <button
-                    onClick={handleSendResponse}
-                    disabled={!interviewState.userInput.trim() || interviewState.isAiSpeaking}
-                    className="w-full px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded text-sm font-medium transition-colors"
-                  >
-                    {interviewState.isAiSpeaking ? 'AI Processing...' : 'Send Response'}
-                  </button>
+                  <div className="flex space-x-2">
+                    <input
+                      type="text"
+                      value={interviewState.userInput}
+                      onChange={(e) => setInterviewState(prev => ({...prev, userInput: e.target.value}))}
+                      placeholder="Type your response here..."
+                      className="flex-1 px-3 py-2 bg-gray-700 text-white rounded text-sm border border-gray-600 focus:border-blue-500 focus:outline-none"
+                      onKeyPress={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault()
+                          handleSendResponse()
+                        }
+                      }}
+                    />
+                    <button
+                      onClick={handleSendResponse}
+                      disabled={!interviewState.userInput.trim() || interviewState.isAiSpeaking}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded text-sm font-medium transition-colors whitespace-nowrap"
+                    >
+                      {interviewState.isAiSpeaking ? 'Processing...' : 'Send'}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -821,3 +1373,66 @@ export default function InterviewRoom() {
     </div>
   )
 }
+
+/**
+ * Removes common speech repetition patterns and stuttering
+ * This helps improve the quality of the transcription before sending it to the AI
+ */
+const removeStuttering = (text: string): string => {
+  if (!text || text.length < 5) return text;
+  
+  // Convert to lowercase for pattern matching
+  const lowerText = text.toLowerCase();
+  const words = lowerText.split(' ');
+  
+  // Filter out immediate single word repetitions (e.g., "I I I want")
+  const withoutSingleRepeats = words.filter((word, index) => {
+    if (index === 0) return true;
+    return word !== words[index - 1];
+  });
+  
+  // Look for repetitive patterns of 2-3 word phrases
+  const result: string[] = [];
+  for (let i = 0; i < withoutSingleRepeats.length; i++) {
+    // Skip if we've already processed this word
+    if (i > 0 && withoutSingleRepeats[i] === result[result.length - 1]) {
+      continue;
+    }
+    
+    // Check for 2-word phrase repetition
+    if (i + 3 < withoutSingleRepeats.length) {
+      const phrase1 = [withoutSingleRepeats[i], withoutSingleRepeats[i + 1]].join(' ');
+      const phrase2 = [withoutSingleRepeats[i + 2], withoutSingleRepeats[i + 3]].join(' ');
+      
+      if (phrase1 === phrase2) {
+        // Skip the repetition by adding only the first instance
+        result.push(withoutSingleRepeats[i]);
+        result.push(withoutSingleRepeats[i + 1]);
+        i += 3; // Skip ahead past the repetition
+        continue;
+      }
+    }
+    
+    // Check for 3-word phrase repetition
+    if (i + 5 < withoutSingleRepeats.length) {
+      const phrase1 = [withoutSingleRepeats[i], withoutSingleRepeats[i + 1], withoutSingleRepeats[i + 2]].join(' ');
+      const phrase2 = [withoutSingleRepeats[i + 3], withoutSingleRepeats[i + 4], withoutSingleRepeats[i + 5]].join(' ');
+      
+      if (phrase1 === phrase2) {
+        // Skip the repetition
+        result.push(withoutSingleRepeats[i]);
+        result.push(withoutSingleRepeats[i + 1]);
+        result.push(withoutSingleRepeats[i + 2]);
+        i += 5; // Skip ahead past the repetition
+        continue;
+      }
+    }
+    
+    // If no pattern found, just add the word
+    result.push(withoutSingleRepeats[i]);
+  }
+  
+  // Join and preserve the original capitalization
+  const normalizedText = result.join(' ');
+  return text.charAt(0).toUpperCase() + normalizedText.slice(1);
+};

@@ -1,193 +1,264 @@
+import { cloudinaryUploader } from './cloudinaryUpload';
+
+// --- Browser SpeechRecognition API Implementation ---
 export interface TranscriptionData {
-  transcript: string
-  confidence: number
-  timestamp: number
-  is_final: boolean
+  transcript: string;
+  confidence: number;
+  timestamp: number;
+  is_final: boolean;
 }
 
-export class TranscriptionService {
-  private mediaRecorder: MediaRecorder | null = null
-  private isRecording = false
-  private audioChunks: Blob[] = []
-  private intervalId: NodeJS.Timeout | null = null
-  private accumulatedChunks: Blob[] = [] // Track accumulated chunks
-  private lastSendTime = 0 // Track when we last sent audio
+class BrowserTranscriptionService {
+  private recognition: any = null;
+  private isListening: boolean = false;
+  private callback: ((data: TranscriptionData) => void) | null = null;
+  private mediaRecorder: MediaRecorder | null = null;
+  private recordedChunks: Blob[] = [];
+  private mediaStream: MediaStream | null = null;
+  private transcriptionLog: string[] = [];
 
-  async startTranscription(onTranscriptionReceived: (data: TranscriptionData) => void): Promise<boolean> {
-    try {
-      console.log('Starting transcription service...')
-      // Stop any existing transcription first
-      this.stopTranscription()
-      this.isRecording = true
-      this.audioChunks = []
-      this.accumulatedChunks = []
-      this.lastSendTime = 0
-
-      // Get microphone access with optimized settings for speech recognition
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          sampleRate: 16000,
-          channelCount: 1,
-        }
-      })
-
-      console.log('Microphone access granted, creating MediaRecorder...')
-      
-      // Force the most compatible format for Deepgram
-      let selectedMimeType = 'audio/webm;codecs=opus';
-      
-      // Check if the browser supports our preferred format
-      if (!MediaRecorder.isTypeSupported(selectedMimeType)) {
-        console.log('audio/webm;codecs=opus not supported, trying alternatives...');
-        const fallbackFormats = [
-          'audio/webm',
-          'audio/mp4',
-          'audio/wav'
-        ];
-        
-        for (const format of fallbackFormats) {
-          if (MediaRecorder.isTypeSupported(format)) {
-            selectedMimeType = format;
-            console.log('Using fallback format:', format);
-            break;
-          }
-        }
+  constructor() {
+    if (typeof window !== 'undefined') {
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        this.recognition = new SpeechRecognition();
+        this.recognition.continuous = true;
+        this.recognition.interimResults = true;
+        this.recognition.maxAlternatives = 1;
+        this.recognition.lang = 'en-US';
       }
-      
-      console.log('Using audio format:', selectedMimeType);
-      
-      // Use lower bitrate for better compatibility
-      this.mediaRecorder = new MediaRecorder(stream, { 
-        mimeType: selectedMimeType,
-        audioBitsPerSecond: 64000  // Reduced from 128000 for better compatibility
-      })
-
-      this.mediaRecorder.ondataavailable = async (event) => {
-        if (event.data.size > 0 && this.isRecording) {
-          console.log(`Audio chunk received: ${event.data.size} bytes (${selectedMimeType})`)
-          this.audioChunks.push(event.data)
-          this.accumulatedChunks.push(event.data)
-          
-          // Only send accumulated chunks every 5 seconds or when we have enough data
-          const now = Date.now()
-          const timeSinceLastSend = now - this.lastSendTime
-          const totalSize = this.accumulatedChunks.reduce((sum, chunk) => sum + chunk.size, 0)
-          
-          if (timeSinceLastSend >= 5000 || totalSize >= 50000) { // 5 seconds or 50KB
-            await this.sendAccumulatedAudio(selectedMimeType, onTranscriptionReceived)
-            this.accumulatedChunks = []
-            this.lastSendTime = now
-          }
-        }
-      }
-
-      this.mediaRecorder.onstart = () => {
-        console.log('MediaRecorder started')
-        this.isRecording = true
-      }
-      this.mediaRecorder.onstop = () => {
-        console.log('MediaRecorder stopped')
-        this.isRecording = false
-        // Send any remaining accumulated audio
-        if (this.accumulatedChunks.length > 0) {
-          this.sendAccumulatedAudio(selectedMimeType, onTranscriptionReceived)
-        }
-        stream.getTracks().forEach(track => track.stop())
-      }
-
-      this.mediaRecorder.onerror = (event) => {
-        console.error('MediaRecorder error:', event)
-      }
-
-      console.log('Starting MediaRecorder with 1-second chunks...')
-      this.mediaRecorder.start(1000) // Record in 1-second chunks for better accumulation
-      return true
-    } catch (error) {
-      console.error('Error starting browser audio recording:', error)
-      return false
     }
   }
 
-  private async sendAccumulatedAudio(mimeType: string, onTranscriptionReceived: (data: TranscriptionData) => void) {
-    if (this.accumulatedChunks.length === 0) return
+  async startTranscription(onTranscriptionReceived: (data: TranscriptionData) => void): Promise<boolean> {
+    if (!this.recognition) {
+      console.error('SpeechRecognition API not supported in this browser.');
+      return false;
+    }
+    this.callback = onTranscriptionReceived;
+    this.isListening = true;
+    this.transcriptionLog = [];
+
+    this.recognition.onstart = () => {
+      console.log('Speech recognition started');
+    };
     
-    const totalSize = this.accumulatedChunks.reduce((sum, chunk) => sum + chunk.size, 0)
-    console.log(`Sending accumulated audio: ${totalSize} bytes from ${this.accumulatedChunks.length} chunks`)
+    this.recognition.onresult = (event: any) => {
+      // Extract the result from the current resultIndex
+      const result = event.results[event.resultIndex];
+      const transcript = result[0].transcript;
+      const confidence = result[0].confidence;
+      const isFinal = result.isFinal;
+      
+      console.log('Speech recognized: ', transcript, isFinal ? '(final)' : '(interim)');
+      
+      // Only process if we have a callback and the transcript isn't empty
+      if (this.callback && transcript.trim().length > 0) {
+        // Filter out common speech recognition artifacts
+        const trimmedTranscript = transcript.trim();
+        
+        // Send the transcription data with proper is_final flag
+        this.callback({
+          transcript: trimmedTranscript,
+          confidence: confidence,
+          timestamp: Date.now(),
+          is_final: isFinal,
+        });
+        
+        // Only store final transcriptions for later upload
+        if (isFinal && trimmedTranscript.length > 2) {
+          this.transcriptionLog.push(trimmedTranscript);
+          
+          // If we have a lot of transcription data, keep only the most recent entries
+          if (this.transcriptionLog.length > 50) {
+            this.transcriptionLog = this.transcriptionLog.slice(-50);
+          }
+        }
+      }
+    };
     
-    // Create a complete audio blob from accumulated chunks
-    const audioBlob = new Blob(this.accumulatedChunks, { type: mimeType })
-    const formData = new FormData()
+    this.recognition.onerror = (event: any) => {
+      console.warn('SpeechRecognition error:', event.error);
+      
+      // For no-speech errors, just continue without alerts
+      if (event.error === 'no-speech') {
+        console.log('No speech detected, continuing recognition...');
+        // Don't change isListening state
+        return;
+      }
+      
+      // For network errors, try to restart
+      if (event.error === 'network') {
+        console.log('Network error, attempting to restart recognition...');
+        if (this.isListening) {
+          try {
+            this.recognition.stop();
+            setTimeout(() => {
+              if (this.isListening) {
+                this.recognition.start();
+              }
+            }, 1000);
+          } catch (e) {
+            console.error('Failed to restart after network error:', e);
+          }
+        }
+        return;
+      }
+      
+      // For other errors, log but don't stop listening unless it's a fatal error
+      if (['not-allowed', 'service-not-allowed', 'aborted'].includes(event.error)) {
+        this.isListening = false;
+      }
+    };
     
-    // Determine file extension based on MIME type
-    let extension = 'webm'
-    if (mimeType.includes('mp4')) extension = 'mp4'
-    else if (mimeType.includes('wav')) extension = 'wav'
-    else if (mimeType.includes('mp3')) extension = 'mp3'
-    
-    formData.append('audio', audioBlob, `audio.${extension}`)
+    this.recognition.onend = () => {
+      console.log('Speech recognition ended, isListening:', this.isListening);
+      if (this.isListening) {
+        // Wait a small amount before restarting to avoid rapid restarts
+        setTimeout(() => {
+          if (this.isListening) {
+            try {
+              console.log('Restarting speech recognition...');
+              this.recognition.start();
+            } catch (e) {
+              console.error('Error restarting recognition:', e);
+            }
+          }
+        }, 300);
+      }
+    };
     
     try {
-      console.log('Sending accumulated audio to transcription API...')
-      const response = await fetch('/api/transcribe', {
-        method: 'POST',
-        body: formData,
-      })
-      
-      if (response.ok) {
-        const data = await response.json()
-        console.log('Transcription API response:', data)
-        
-        // Only process meaningful transcripts (not placeholders)
-        if (data.transcript && 
-            data.transcript.length > 0 && 
-            !data.transcript.includes('[Speech detected') &&
-            !data.transcript.includes('processing')) {
-          onTranscriptionReceived({
-            transcript: data.transcript || '',
-            confidence: data.confidence || 0,
-            timestamp: Date.now(),
-            is_final: true
-          })
-        } else if (data.transcript && data.transcript.length > 0) {
-          console.log('Received placeholder transcript, skipping...')
-        } else {
-          console.log('No transcript in response')
-        }
-      } else {
-        console.error('Transcription API error:', response.status)
-        const errorText = await response.text()
-        console.error('Error details:', errorText)
-      }
-    } catch (err) {
-      console.error('Error calling transcription API:', err)
+      this.recognition.start();
+      return true;
+    } catch (error) {
+      console.error('Error starting SpeechRecognition:', error);
+      return false;
     }
   }
 
   stopTranscription(): void {
-    console.log('Stopping transcription service...')
-    if (this.mediaRecorder && this.isRecording) {
-      this.mediaRecorder.stop()
+    this.isListening = false;
+    if (this.recognition) {
+      try {
+        this.recognition.stop();
+        console.log('SpeechRecognition stopped');
+      } catch (error) {
+        console.error('Error stopping SpeechRecognition:', error);
+      }
     }
-    this.isRecording = false
-    this.audioChunks = []
-    if (this.intervalId) {
-      clearInterval(this.intervalId)
-      this.intervalId = null
+  }
+  
+  // Add method to resume transcription with existing callback
+  resumeTranscription(): boolean {
+    if (!this.recognition || !this.callback) {
+      console.error('Cannot resume - recognition not initialized or no callback set');
+      return false;
+    }
+    
+    this.isListening = true;
+    try {
+      this.recognition.start();
+      console.log('SpeechRecognition resumed');
+      return true;
+    } catch (error) {
+      console.error('Error resuming SpeechRecognition:', error);
+      return false;
     }
   }
 
-  isAvailable(): boolean {
-    return true
+  // --- Video/Audio Recording and Upload ---
+  async startRecording(): Promise<MediaStream | null> {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      alert('Media recording not supported in this browser.');
+      return null;
+    }
+    try {
+      // Explicitly request high-quality video (critical for face analysis)
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({ 
+        video: {
+          width: { min: 640, ideal: 1280 },
+          height: { min: 480, ideal: 720 },
+          facingMode: 'user'
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      
+      this.recordedChunks = [];
+      
+      // Use a more reliable MIME type (webm with VP8 is widely supported)
+      const mimeType = 'video/webm;codecs=vp8,opus';
+      
+      // Configure MediaRecorder with larger timeslice for more reliable recording
+      this.mediaRecorder = new MediaRecorder(this.mediaStream, { 
+        mimeType: mimeType,
+        videoBitsPerSecond: 1000000 // 1 Mbps for better quality
+      });
+      
+      this.mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          this.recordedChunks.push(event.data);
+        }
+      };
+      
+      // Start recording with 1-second intervals to ensure data is captured
+      this.mediaRecorder.start(1000);
+      
+      console.log('Recording started successfully');
+      
+      // Return the stream so the UI can display it immediately
+      return this.mediaStream;
+    } catch (error) {
+      console.error('Error starting media recording:', error);
+      return null;
+    }
+  }
+
+  stopRecording(): Blob | null {
+    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+      this.mediaRecorder.stop();
+      this.mediaStream?.getTracks().forEach((track) => track.stop());
+      return new Blob(this.recordedChunks, { type: 'video/webm' });
+    }
+    return null;
+  }
+
+  async uploadVideoToCloudinary(blob: Blob, filename: string): Promise<any> {
+    try {
+      return await cloudinaryUploader.uploadVideo(blob, filename, { folder: 'interviews/videos' });
+    } catch (error) {
+      console.error('Error uploading video:', error);
+      throw error;
+    }
+  }
+
+  async uploadTranscriptionToCloudinary(filename: string): Promise<any> {
+    try {
+      const transcriptionText = this.transcriptionLog.join('\n');
+      const textBlob = new Blob([transcriptionText], { type: 'text/plain' });
+      // Use uploadImage for text, or add a new method in cloudinaryUpload.ts for text files if needed
+      return await cloudinaryUploader.uploadImage(textBlob as any, filename + '.txt', { folder: 'interviews/transcriptions' });
+    } catch (error) {
+      console.error('Error uploading transcription:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Returns the current MediaStream (camera+mic) for use in a <video> element.
+   * Call after startRecording().
+   */
+  getMediaStream(): MediaStream | null {
+    return this.mediaStream;
   }
 
   async testConnection(): Promise<boolean> {
-    // Always return true, since browser can't test Deepgram directly
-    return true
+    return !!this.recognition;
   }
 }
 
-export const transcriptionService = new TranscriptionService()
-export default transcriptionService
+export const transcriptionService = new BrowserTranscriptionService();

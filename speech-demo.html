@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Speech Recognition Gemini Demo</title>
+</head>
+<body>
+  <h1>Speech Recognition Gemini Demo</h1>
+  <button id="startBtn">Start Interview</button>
+  <button id="stopBtn">Stop</button>
+  <div id="output" style="margin-top:20px;"></div>
+  <audio id="audio" controls style="display:none;"></audio>
+  <script>
+    const output = document.getElementById('output');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const audio = document.getElementById('audio');
+    
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      output.innerHTML = '<b>Your browser does not support Speech Recognition.</b>';
+      startBtn.disabled = true;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.lang = 'en-US';
+
+    recognition.onstart = () => {
+      output.innerHTML = '<i>Listening... Please speak.</i>';
+    };
+    recognition.onresult = async (event) => {
+      const transcript = event.results[event.resultIndex][0].transcript;
+      output.innerHTML = `<b>Transcript:</b> ${transcript}`;
+      const result = await callGemini(transcript);
+      const text = result.candidates?.[0]?.content?.parts?.[0]?.text || '[No response]';
+      output.innerHTML += `<br><b>Gemini:</b> ${text}`;
+      await TTS(text);
+    };
+    recognition.onerror = (event) => {
+      output.innerHTML = `<span style='color:red'>Error: ${event.error}</span>`;
+    };
+    recognition.onend = () => {
+      output.innerHTML += '<br><i>Recognition stopped.</i>';
+    };
+
+    startBtn.onclick = () => recognition.start();
+    stopBtn.onclick = () => recognition.stop();
+
+    async function callGemini(text) {
+      const API_KEY = 'AIzaSyAKbKfp2-V5hkLUvZM49VzBDUJBZLkwj5k'; // <-- Paste your Gemini API key here
+      const body = {
+        system_instruction: {
+          parts: [{ text: "Your name is Dara. You are an AI Interviewer designed to conduct structured, professional interviews with job candidates. Your role is to ask insightful, role-specific questions, evaluate candidate responses, and provide objective feedback. Your interview process should follow these guidelines: 1. Greet the candidate professionally and explain the interview structure. 2. Begin with 1–2 warm-up questions (e.g., self-introduction, general background). 3. Ask 4–6 role-specific technical questions based on the job title or field provided (e.g., frontend developer, data analyst, marketing executive). 4. Ask 1–2 behavioral or situational questions to assess soft skills. 5. Use follow-up questions if an answer is vague or incomplete. 6. Transcribe and summarize key points from each answer for feedback. 7. Maintain a friendly, encouraging, and unbiased tone. 8. At the end, thank the candidate and provide a short summary of their performance: strengths, areas for improvement, and a confidence score (1–10). 9. Do not make hiring decisions—only evaluate and summarize. Additional Behavior: Avoid repetition. Maintain a conversational pace. Keep questions concise and clear. Adapt to the candidate’s level of expertise." }]
+        },
+        contents: [
+          { parts: [ { text } ] }
+        ]
+      };
+      try {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${API_KEY}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const result = await response.json();
+        if (result.error) {
+          output.innerHTML += `<br><span style="color:red"><b>Gemini API Error:</b> ${result.error.message}</span>`;
+          return { candidates: [{ content: { parts: [{ text: '[Gemini API Error]' }] } }] };
+        }
+        if (!result.candidates || !result.candidates[0]?.content?.parts?.[0]?.text) {
+          output.innerHTML += `<br><span style="color:orange"><b>Gemini raw response:</b> <pre>${JSON.stringify(result, null, 2)}</pre></span>`;
+          return { candidates: [{ content: { parts: [{ text: '[No valid Gemini response]' }] } }] };
+        }
+        return result;
+      } catch (err) {
+        output.innerHTML += `<br><span style="color:red"><b>Network or JS Error:</b> ${err}</span>`;
+        return { candidates: [{ content: { parts: [{ text: '[Network or JS Error]' }] } }] };
+      }
+    }
+
+    async function TTS(text) {
+      if ('speechSynthesis' in window) {
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = 'en-US';
+        window.speechSynthesis.speak(utter);
+      }
+    }
+  </script>
+</body>
+</html>

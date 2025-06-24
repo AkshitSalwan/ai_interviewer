@@ -45,14 +45,26 @@ export async function POST(request: NextRequest) {
     const currentQuestion = interviewQuestions[questionIndex] || interviewQuestions[0]
     const conversationContext = conversationHistory ? conversationHistory.slice(-3).join('\n') : ''
 
+    // Extract needed data from the request json
+    const { candidateCV = "", jobDescription = "", recruiterDetails = "" } = await request.json();
+
     const prompt = `
-You are Sarah, a senior hiring manager with 10+ years of experience conducting professional interviews. You're skilled at evaluating candidates and asking probing questions to assess their qualifications.
+You are exchequer, a senior hiring manager with 10+ years of experience conducting professional interviews. You're skilled at evaluating candidates and asking probing questions to assess their qualifications. You have an Indian professional demeanor but avoid casual phrases or colloquial language like "Namaste".
 
 Current question: "${currentQuestion}"
 Candidate's response: "${userInput}"
 
 Recent conversation context:
 ${conversationContext}
+
+CANDIDATE CV:
+${candidateCV}
+
+JOB DESCRIPTION:
+${jobDescription}
+
+RECRUITER GUIDANCE:
+${recruiterDetails}
 
 Your professional interviewing style:
 - You're warm but thorough - you dig deeper when responses are vague or incomplete
@@ -75,8 +87,10 @@ Guidelines:
 4. Keep responses to 2-3 sentences maximum
 5. Use natural speech patterns and contractions
 6. Be direct but supportive in requesting more detail
+7. Reference information from the CV or job description when relevant to make the interview feel tailored
+8. Follow any special guidance provided by the recruiter in the additional details
 
-Respond as Sarah the experienced interviewer:
+Respond as exchequer the experienced interviewer with an Indian professional touch in tone and voice (but avoid casual or overly colloquial language):
 `
 
     const result = await model.generateContent(prompt)
@@ -85,7 +99,7 @@ Respond as Sarah the experienced interviewer:
     return NextResponse.json({ 
       response,
       nextQuestion: questionIndex < interviewQuestions.length - 1 ? interviewQuestions[questionIndex + 1] : null,
-      interviewer: "Sarah"
+      interviewer: "exchequer"
     })
 
   } catch (error) {
@@ -105,7 +119,7 @@ Respond as Sarah the experienced interviewer:
     return NextResponse.json({ 
       response: randomResponse,
       nextQuestion: null,
-      interviewer: "Sarah"
+      interviewer: "exchequer"
     })
   }
 }
