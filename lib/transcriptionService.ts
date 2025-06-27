@@ -80,10 +80,11 @@ class BrowserTranscriptionService {
     this.recognition.onerror = (event: any) => {
       console.warn('SpeechRecognition error:', event.error);
       
-      // For no-speech errors, just continue without alerts
+      // For no-speech errors, just continue without alerts or restarts
       if (event.error === 'no-speech') {
         console.log('No speech detected, continuing recognition...');
-        // Don't change isListening state
+        // Don't change isListening state and don't restart immediately
+        // The onend handler will restart if needed
         return;
       }
       
@@ -97,7 +98,7 @@ class BrowserTranscriptionService {
               if (this.isListening) {
                 this.recognition.start();
               }
-            }, 1000);
+            }, 1500); // Increased delay for network recovery
           } catch (e) {
             console.error('Failed to restart after network error:', e);
           }
@@ -114,7 +115,7 @@ class BrowserTranscriptionService {
     this.recognition.onend = () => {
       console.log('Speech recognition ended, isListening:', this.isListening);
       if (this.isListening) {
-        // Wait a small amount before restarting to avoid rapid restarts
+        // Wait a longer amount before restarting to avoid rapid restarts and improve stability
         setTimeout(() => {
           if (this.isListening) {
             try {
@@ -122,9 +123,19 @@ class BrowserTranscriptionService {
               this.recognition.start();
             } catch (e) {
               console.error('Error restarting recognition:', e);
+              // If restart fails, try again after a longer delay
+              setTimeout(() => {
+                if (this.isListening) {
+                  try {
+                    this.recognition.start();
+                  } catch (retryError) {
+                    console.error('Failed to restart recognition after retry:', retryError);
+                  }
+                }
+              }, 2000);
             }
           }
-        }, 300);
+        }, 1000); // Increased from 300ms to 1000ms for better stability
       }
     };
     

@@ -308,28 +308,30 @@ export default function InterviewRoom() {
           if (!interviewState.isAiSpeaking) {
             // Response timing strategy based on completion indicators
             if (definitelyComplete && normalizedTranscript.length > 10) {
-              // Almost immediate response for definitely complete statements (150ms delay)
+              // Almost immediate response for definitely complete statements (300ms delay)
               console.log('Definite completion detected, triggering AI response immediately');
-              generateAIResponse(normalizedTranscript);
+              setTimeout(() => {
+                if (!interviewState.isAiSpeaking) {
+                  generateAIResponse(normalizedTranscript);
+                }
+              }, 300);
               return; // Skip setting additional timeouts
             } else if (seemsComplete && normalizedTranscript.length > 15) {
-              // Very quick response for substantial statements (200ms delay)
-              console.log('Complete statement detected, triggering AI response very quickly');
+              // Very quick response for substantial statements (800ms delay)
+              console.log('Complete statement detected, triggering AI response quickly');
               silenceTimeout = setTimeout(() => {
                 if (!interviewState.isAiSpeaking) {
                   generateAIResponse(normalizedTranscript);
                 }
-              }, 200);
-            } else {
-              // Regular silence detection with very short timeout
+              }, 800);
+            } else if (normalizedTranscript.length > 10) {
+              // Regular silence detection with moderate timeout
               silenceTimeout = setTimeout(() => {
                 if (!interviewState.isAiSpeaking) {
-                  console.log('Brief silence detected, triggering AI response');
-                  if (normalizedTranscript.length > 5) {
-                    generateAIResponse(normalizedTranscript);
-                  }
+                  console.log('Silence detected after speech, triggering AI response');
+                  generateAIResponse(normalizedTranscript);
                 }
-              }, 600); // Very short silence detection (600ms)
+              }, 1500); // Increased timeout for better natural conversation flow
             }
           }
         } else if (data.transcript && data.transcript.length > 0) {
@@ -507,7 +509,7 @@ export default function InterviewRoom() {
               audioTrack.enabled = originalMicState;
             }
           }
-        }, 1500); // Longer delay before restoring mic to ensure speech is completely done
+        }, 2000); // Longer delay before restoring mic to ensure speech is completely done
       }
 
       // Ensure we're in the AI speaking state
@@ -519,101 +521,21 @@ export default function InterviewRoom() {
       // Initialize speech synthesis
       const utterance = new SpeechSynthesisUtterance(text)
       
-      // Get available voices and log them for debugging
+      // Use Samantha voice (or fallback to any available female English voice)
       const availableVoices = window.speechSynthesis.getVoices()
-      console.log('Available voices:', availableVoices.map(v => `${v.name} (${v.lang})`).join(', '))
+      const selectedVoice = availableVoices.find(voice => 
+        voice.name.includes('Samantha') || 
+        (voice.lang.startsWith('en') && voice.name.toLowerCase().includes('female'))
+      ) || availableVoices.find(voice => voice.lang.startsWith('en'))
       
-      // Select a premium female voice with good quality (less likely to cause echo)
-      // 1. Premium voices often have better processing that reduces artifacts
-      // 2. Some voices are known to have fewer echo issues than others
-      // 3. Premium voices typically have better audio characteristics
-      
-      // Prioritize Indian voices first as we want an Indian accent for the interviewer
-      // Veena is a high-quality Indian female voice
-      const indianVoices = ['Veena', 'Aditi', 'Raveena', 'Priya'];
-      const bestVoices = ['Google UK English Female', 'Microsoft Zira', 'Samantha', 'Victoria'];
-      const goodVoices = ['Karen', 'Moira', 'Tessa', 'Fiona']; 
-      
-      // Try Indian voices first
-      let selectedVoice = availableVoices.find(voice => 
-        indianVoices.some(name => voice.name.includes(name))
-      );
-      
-      // Log if Indian voice found
-      if (selectedVoice) {
-        console.log('Using Indian voice:', selectedVoice.name);
-      }
-      
-      // Female voice indicators if we need to fall back
-      const femaleVoiceIndicators = ['female', 'woman', 'girl', 'samantha', 'victoria', 'karen', 'moira', 'tessa', 'veena', 'fiona', 'priya', 'aditi', 'raveena'];
-      
-      // If no Indian voice found, try the best voices known to have minimal echo
-      if (!selectedVoice) {
-        selectedVoice = availableVoices.find(voice => 
-          bestVoices.some(name => voice.name.includes(name))
-        );
-      }
-      
-      // If still no voice found, try the good voices list
-      if (!selectedVoice) {
-        selectedVoice = availableVoices.find(voice => 
-          goodVoices.some(name => voice.name.includes(name))
-        );
-      }
-      
-      // If still no voice, try to find an Indian female voice by language code
-      if (!selectedVoice) {
-        selectedVoice = availableVoices.find(voice => 
-          (voice.lang === 'en-IN' || voice.lang === 'hi-IN') && 
-          femaleVoiceIndicators.some(indicator => voice.name.toLowerCase().includes(indicator))
-        );
-      }
-      
-      // If no Indian female voice, try any female English voice
-      if (!selectedVoice) {
-        selectedVoice = availableVoices.find(voice =>
-          voice.lang.startsWith('en') && 
-          femaleVoiceIndicators.some(indicator => voice.name.toLowerCase().includes(indicator))
-        );
-      }
-      
-      // If still no voice, try any female voice regardless of language
-      if (!selectedVoice) {
-        selectedVoice = availableVoices.find(voice =>
-          femaleVoiceIndicators.some(indicator => voice.name.toLowerCase().includes(indicator))
-        );
-      }
-      
-      // Fallback to any English voice
-      if (!selectedVoice) {
-        selectedVoice = availableVoices.find(voice => voice.lang.startsWith('en'));
-      }
-      
-      // Use the selected voice or default
       if (selectedVoice) {
         utterance.voice = selectedVoice;
-        console.log(`Using voice: ${selectedVoice.name} (${selectedVoice.lang})`);
-      } else {
-        console.log('No suitable voice found, using default');
       }
 
-      // Set voice properties optimized for female voice clarity and minimal echo
-      
-      // Adjust parameters based on the selected voice for optimal quality and reduced echo
-      if (selectedVoice && indianVoices.some(name => selectedVoice.name.includes(name))) {
-        // Specific tuning for Indian voices which may need different parameters
-        utterance.rate = 0.9;   // Slightly slower for Indian accent clarity
-        utterance.pitch = 1.0;  // Natural pitch for Indian voices
-        utterance.volume = 0.7; // Lower volume to minimize echo
-      } else {
-        // General tuning for other voices
-        utterance.rate = 0.93;  // Slightly slower rate for clarity but not unnaturally slow
-        utterance.pitch = 1.05; // Slightly higher pitch for female voice characteristics
-        utterance.volume = 0.65; // Even lower volume to minimize echo and prevent distortion
-      }
-      
-      // Log the final voice settings
-      console.log(`Voice settings: rate=${utterance.rate}, pitch=${utterance.pitch}, volume=${utterance.volume}`);
+      // Set consistent voice properties for optimal quality
+      utterance.rate = 0.93;  // Slightly slower rate for clarity
+      utterance.pitch = 1.05; // Slightly higher pitch for female voice characteristics
+      utterance.volume = 0.65; // Lower volume to minimize echo
       
       // Return a promise that resolves when the speech is done
       return new Promise<void>((resolve) => {
@@ -652,8 +574,8 @@ export default function InterviewRoom() {
                 const timeSinceResume = Date.now() - transcriptionResumeTime;
                 
                 // Aggressive echo detection for transcriptions that arrive soon after AI speech
-                // Extend the window for possible echo detection to 2000ms (2 seconds)
-                if (timeSinceResume < 2000) {
+                // Reduce the window for possible echo detection to 1500ms (1.5 seconds)
+                if (timeSinceResume < 1500) {
                   // For immediate transcriptions, check for AI speech fragments
                   const aiWords = aiLastText.toLowerCase().split(/\s+/)
                                   .filter(w => w.length > 2) // Consider shorter words too
@@ -716,31 +638,35 @@ export default function InterviewRoom() {
                   transcription: prev.transcription + (prev.transcription ? ' ' : '') + normalizedTranscript
                 }));
                 
-                // For transcriptions after AI speech, we want very quick response time
+                // For transcriptions after AI speech, we want quick but natural response time
                 // Assume the user is likely responding to the AI's question
-                if (normalizedTranscript.length > 10 && !interviewState.isAiSpeaking) {
+                if (normalizedTranscript.length > 8 && !interviewState.isAiSpeaking) {
                   // Check for a complete statement
                   const isComplete = /[.!?]$/.test(normalizedTranscript) || 
-                                     normalizedTranscript.length > 20 ||
-                                     /(?:thank you|that's all|that is all)/i.test(normalizedTranscript);
+                                     normalizedTranscript.length > 25 ||
+                                     /(?:thank you|that's all|that is all|done|finished)/i.test(normalizedTranscript);
                                     
-                  // If it seems complete, respond immediately, otherwise set a short timeout
+                  // If it seems complete, respond with a short delay, otherwise set a longer timeout
                   if (isComplete) {
-                    console.log('Complete response after AI speech, triggering immediate AI response');
-                    generateAIResponse(normalizedTranscript);
-                  } else {
-                    // Set a very short silence timeout for quick response
+                    console.log('Complete response after AI speech, triggering AI response');
                     setTimeout(() => {
                       if (!interviewState.isAiSpeaking) {
-                        console.log('Quick follow-up to AI question, triggering AI response');
                         generateAIResponse(normalizedTranscript);
                       }
                     }, 500);
+                  } else {
+                    // Set a moderate silence timeout for more natural conversation
+                    setTimeout(() => {
+                      if (!interviewState.isAiSpeaking) {
+                        console.log('Follow-up to AI question, triggering AI response');
+                        generateAIResponse(normalizedTranscript);
+                      }
+                    }, 1200);
                   }
                 }
               }
             });
-          }, 600) // Reduced delay for faster response after AI speaks
+          }, 800) // Increased delay for better microphone recovery after AI speaks
           
           resolve()
         }
@@ -880,11 +806,11 @@ export default function InterviewRoom() {
 
   const handleSendResponse = () => {
     // Don't process empty messages
-    if (!interviewState.transcription.trim()) {
+    if (!interviewState.userInput.trim()) {
       return;
     }
     
-    console.log('Sending manual response:', interviewState.transcription.trim());
+    console.log('Sending manual response:', interviewState.userInput.trim());
     
     try {
       // Temporarily stop transcription while AI is responding
@@ -893,16 +819,16 @@ export default function InterviewRoom() {
       // Update the conversation with the user's response
       setConversationHistory(prev => [
         ...prev,
-        `Candidate: ${interviewState.transcription.trim()}`
+        `Candidate: ${interviewState.userInput.trim()}`
       ]);
       
-      // Generate AI response for the current transcription
-      generateAIResponse(interviewState.transcription.trim());
+      // Generate AI response for the manual input
+      generateAIResponse(interviewState.userInput.trim());
       
-      // Clear the transcription field after sending
+      // Clear the user input field after sending
       setInterviewState(prev => ({
         ...prev,
-        transcription: ''
+        userInput: ''
       }));
     } catch (error) {
       console.error('Error sending response:', error);

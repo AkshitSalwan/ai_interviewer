@@ -11,7 +11,18 @@ const getGeminiAI = () => {
 
 export async function POST(request: NextRequest) {
   try {
-    const { userInput, questionIndex, context, conversationHistory } = await request.json()
+    // Read the request body only once
+    const requestData = await request.json()
+    const { 
+      userInput, 
+      questionIndex, 
+      context, 
+      conversationHistory,
+      candidateCV = "", 
+      jobDescription = "", 
+      recruiterDetails = "",
+      conversation = []
+    } = requestData
 
     if (!process.env.GEMINI_API_KEY) {
       // More professional fallback responses that probe for details
@@ -44,9 +55,6 @@ export async function POST(request: NextRequest) {
 
     const currentQuestion = interviewQuestions[questionIndex] || interviewQuestions[0]
     const conversationContext = conversationHistory ? conversationHistory.slice(-3).join('\n') : ''
-
-    // Extract needed data from the request json
-    const { candidateCV = "", jobDescription = "", recruiterDetails = "" } = await request.json();
 
     const prompt = `
 You are exchequer, a senior hiring manager with 10+ years of experience conducting professional interviews. You're skilled at evaluating candidates and asking probing questions to assess their qualifications. You have an Indian professional demeanor but avoid casual phrases or colloquial language like "Namaste".
