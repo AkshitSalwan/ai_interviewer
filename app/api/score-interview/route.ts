@@ -91,13 +91,21 @@ export async function POST(request: NextRequest) {
 async function generateDynamicScore(data: InterviewData): Promise<ScoringResult> {
   try {
     // Check if we have meaningful data
-    const wordCount = data.transcription ? data.transcription.split(' ').filter(w => w.length > 0).length : 0
-    const validEmotions = data.emotions.filter(e => e && typeof e.score === 'number')
+    const transcriptionText = data.transcription?.trim() || ''
+    const wordCount = transcriptionText ? transcriptionText.split(/\s+/).filter(w => w.length > 0).length : 0
+    const validEmotions = data.emotions?.filter(e => e && typeof e.score === 'number') || []
     
-    // If no meaningful data, return fallback scoring
-    if (wordCount === 0 && validEmotions.length === 0) {
-      console.log('No meaningful data for scoring, using fallback')
+    console.log(`Scoring Analysis - Words: ${wordCount}, Emotions: ${validEmotions.length}, Duration: ${data.duration}`)
+    
+    // If absolutely no data, return fallback scoring
+    if (wordCount === 0 && validEmotions.length === 0 && (!data.duration || data.duration === 0)) {
+      console.log('No meaningful data for scoring, using zero fallback')
       return getFallbackScoring(data)
+    }
+    
+    // Even with minimal data, we can provide some scoring
+    if (wordCount > 0 || validEmotions.length > 0 || data.duration > 0) {
+      console.log('Processing with available data...')
     }
     
     // Get AI analysis first
@@ -163,8 +171,12 @@ async function getAIAnalysis(data: InterviewData): Promise<string> {
   }
   
   try {
-    // Create a cache key based on the data
-    const cacheKey = `${data.transcription.substring(0, 100)}_${data.emotions.length}_${data.duration}`
+    // Create a more specific cache key
+    const wordCount = data.transcription.split(/\s+/).filter(w => w.length > 1).length
+    const avgEmotionScore = data.emotions.length > 0 
+      ? Math.round((data.emotions.reduce((sum, e) => sum + e.score, 0) / data.emotions.length) * 100)
+      : 0
+    const cacheKey = `${wordCount}_${avgEmotionScore}_${Math.floor(data.duration / 30)}_${data.transcription.substring(0, 50).replace(/\s/g, '')}`
     
     // Check if we have a cached response
     const cachedAnalysis = getCachedAnalysis(cacheKey)
@@ -178,31 +190,79 @@ async function getAIAnalysis(data: InterviewData): Promise<string> {
       console.log('Rate limit exceeded, using fallback analysis')
       return generateFallbackAnalysis(data)
     }
-    
+
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
     
+    // More detailed statistics for analysis
+    const words = data.transcription.split(/\s+/).filter(w => w.length > 1)
+    const sentences = data.transcription.split(/[.!?]+/).filter(s => s.trim().length > 5)
+    const avgWordsPerSentence = sentences.length > 0 ? (words.length / sentences.length).toFixed(1) : '0'
+    
+    // Emotion analysis
+    const emotionCounts: Record<string, number> = {}
+    data.emotions.forEach(e => {
+      emotionCounts[e.emotion] = (emotionCounts[e.emotion] || 0) + 1
+    })
+    const topEmotions = Object.entries(emotionCounts)
+      .sort(([, a], [, b]) => (b as number) - (a as number))
+      .slice(0, 3)
+      .map(([emotion, count]) => `${emotion} (${count} times)`)
+    
     const emotionSummary = data.emotions.length > 0 
-      ? `Emotions detected: ${data.emotions.map(e => `${e.emotion} (${Math.round(e.score * 100)}%)`).join(', ')}`
+      ? `Top emotions: ${topEmotions.join(', ')}. Average confidence: ${avgEmotionScore}%`
       : 'No emotion data available'
     
+    // Content analysis keywords
+    const technicalTerms = ['project', 'system', 'development', 'technology', 'framework', 'database', 'api']
+    const foundTechnical = technicalTerms.filter(term => 
+      data.transcription.toLowerCase().includes(term)
+    )
+    
+    const problemSolvingTerms = ['challenge', 'problem', 'solution', 'approach', 'analyze']
+    const foundProblemSolving = problemSolvingTerms.filter(term => 
+      data.transcription.toLowerCase().includes(term)
+    )
+
     const prompt = `
-As an expert interview assessor, analyze this candidate's performance:
+You are an expert interview assessor with 15+ years of experience. Analyze this candidate's interview performance with precision and actionable insights.
 
-Interview Duration: ${Math.floor(data.duration / 60)} minutes ${data.duration % 60} seconds
-Word Count: ${data.transcription.split(' ').length} words
-${emotionSummary}
+CANDIDATE STATISTICS:
+- Interview Duration: ${Math.floor(data.duration / 60)}m ${data.duration % 60}s
+- Total Words: ${words.length} words
+- Sentences: ${sentences.length} 
+- Average Words per Sentence: ${avgWordsPerSentence}
+- Speaking Rate: ${data.duration > 0 ? Math.round((words.length / data.duration) * 60) : 0} words per minute
+- ${emotionSummary}
+- Technical Terms Used: ${foundTechnical.length > 0 ? foundTechnical.join(', ') : 'None detected'}
+- Problem-Solving Language: ${foundProblemSolving.length > 0 ? foundProblemSolving.join(', ') : 'None detected'}
 
-Candidate Response: "${data.transcription}"
+CANDIDATE RESPONSE:
+"${data.transcription}"
 
-Provide a professional assessment covering:
-1. Communication clarity and effectiveness
-2. Technical competency demonstrated
-3. Problem-solving approach
-4. Confidence and presence
-5. Areas of strength
-6. Specific areas for improvement
+PROVIDE DETAILED ANALYSIS:
 
-Keep analysis professional, constructive, and specific. Limit to 300 words.
+1. **Communication Assessment** (be specific about word count, sentence structure, clarity):
+   - Evaluate if ${words.length} words is appropriate for the response
+   - Comment on sentence structure (avg ${avgWordsPerSentence} words/sentence)
+   - Assess speaking pace and articulation
+
+2. **Content Quality** (analyze depth and relevance):
+   - Technical competency demonstrated through specific examples
+   - Problem-solving approach and logical thinking
+   - Use of industry-relevant terminology
+
+3. **Professional Presence** (based on emotion data and language patterns):
+   - Confidence level and emotional stability
+   - Professional communication style
+   - Areas showing strength or nervousness
+
+4. **Specific Strengths** (list 2-3 concrete strengths with evidence)
+
+5. **Improvement Areas** (list 2-3 specific, actionable recommendations)
+
+6. **Overall Assessment** (hiring recommendation with rationale)
+
+Be precise, evidence-based, and constructive. Focus on specific observations rather than generic comments. Limit response to 400 words.
 `
 
     const result = await model.generateContent(prompt)
@@ -220,25 +280,106 @@ Keep analysis professional, constructive, and specific. Limit to 300 words.
 }
 
 function calculateCommunicationScore(data: InterviewData): number {
-  const words = data.transcription.split(' ').filter(word => word.length > 0)
-  const sentences = data.transcription.split(/[.!?]+/).filter(s => s.trim().length > 0)
+  // Handle null/undefined transcription
+  const transcriptionText = data.transcription?.trim() || ''
   
-  // Base score on word count (target: 150-300 words for good response)
-  const wordScore = Math.min(words.length / 200, 1) * 40
+  if (!transcriptionText) {
+    console.log('No transcription available for communication scoring')
+    return 0
+  }
   
-  // Sentence structure (average words per sentence: 12-20 is good)
-  const avgWordsPerSentence = words.length / Math.max(sentences.length, 1)
-  const structureScore = avgWordsPerSentence >= 8 && avgWordsPerSentence <= 25 ? 30 : 15
+  // Improved word counting - filter out empty strings and single characters
+  const words = transcriptionText
+    .split(/\s+/)
+    .filter(word => word.length > 1 && /^[a-zA-Z'-]+$/.test(word))
   
-  // Vocabulary diversity
-  const uniqueWords = new Set(words.map(w => w.toLowerCase()))
-  const diversityScore = Math.min(uniqueWords.size / words.length, 0.8) * 30
+  // More accurate sentence detection
+  const sentences = transcriptionText
+    .split(/[.!?]+/)
+    .filter(s => s.trim().length > 5) // Only count meaningful sentences
   
-  return Math.round(Math.min(wordScore + structureScore + diversityScore, 100))
+  console.log(`Communication Analysis: ${words.length} words, ${sentences.length} sentences`)
+  
+  // Return early score for very minimal data
+  if (words.length === 0) {
+    return 0
+  }
+  
+  // Base score on word count with better scaling
+  // 10-50 words: basic, 50-150 words: good, 150-300: excellent, 300+: very good but might be verbose
+  let wordScore = 0
+  if (words.length >= 50 && words.length <= 150) {
+    wordScore = Math.min((words.length / 150) * 45, 45)
+  } else if (words.length > 150 && words.length <= 300) {
+    wordScore = 45 + Math.min(((words.length - 150) / 150) * 35, 35)
+  } else if (words.length > 300) {
+    wordScore = 75 - Math.min(((words.length - 300) / 200) * 15, 15) // Slight penalty for being too verbose
+  } else if (words.length >= 10) {
+    wordScore = (words.length / 50) * 30 // Reduced penalty for fewer words
+  } else {
+    wordScore = words.length * 3 // Minimal score for very few words
+  }
+  
+  // Improved sentence structure analysis
+  const avgWordsPerSentence = sentences.length > 0 ? words.length / sentences.length : 0
+  let structureScore = 0
+  if (avgWordsPerSentence >= 8 && avgWordsPerSentence <= 20) {
+    structureScore = 20 // Optimal sentence length
+  } else if (avgWordsPerSentence >= 5 && avgWordsPerSentence <= 25) {
+    structureScore = 15 // Good sentence length
+  } else {
+    structureScore = 5 // Poor sentence structure
+  }
+  
+  // Enhanced vocabulary diversity with better filtering
+  const uniqueWords = new Set(
+    words
+      .map(w => w.toLowerCase())
+      .filter(w => w.length > 2 && !['the', 'and', 'but', 'for', 'are', 'that', 'this', 'was'].includes(w))
+  )
+  const diversityRatio = words.length > 0 ? uniqueWords.size / words.length : 0
+  const diversityScore = Math.min(diversityRatio * 60, 20) // Cap at 20 points
+  
+  // Filler word penalty
+  const fillerWords = ['um', 'uh', 'like', 'you know', 'basically', 'actually', 'literally']
+  const fillerCount = fillerWords.reduce((count, filler) => {
+    return count + (data.transcription.toLowerCase().match(new RegExp(`\\b${filler}\\b`, 'g')) || []).length
+  }, 0)
+  const fillerPenalty = Math.min(fillerCount * 2, 15) // Max penalty of 15 points
+  
+  const finalScore = Math.round(Math.max(0, Math.min(wordScore + structureScore + diversityScore - fillerPenalty, 100)))
+  
+  console.log(`Communication Score Breakdown:
+    Words: ${wordScore.toFixed(1)} (${words.length} words)
+    Structure: ${structureScore} (avg ${avgWordsPerSentence.toFixed(1)} words/sentence)
+    Diversity: ${diversityScore.toFixed(1)} (${diversityRatio.toFixed(2)} ratio)
+    Filler Penalty: -${fillerPenalty} (${fillerCount} filler words)
+    Final: ${finalScore}`)
+  
+  return finalScore
 }
 
 function calculateConfidenceScore(data: InterviewData): number {
-  if (data.emotions.length === 0) return 50
+  // Handle missing or empty emotions array
+  const emotions = data.emotions || []
+  
+  if (emotions.length === 0) {
+    console.log('No emotion data available for confidence scoring')
+    // Return a neutral confidence score based on the fact that they're speaking
+    const transcriptionText = data.transcription?.trim() || ''
+    if (transcriptionText && transcriptionText.length > 20) {
+      return 50 // Neutral confidence if they're speaking
+    }
+    return 30 // Lower baseline if very little speech
+  }
+  
+  // Filter valid emotions
+  const validEmotions = emotions.filter(e => e && typeof e.score === 'number' && e.score >= 0 && e.score <= 1)
+  
+  if (validEmotions.length === 0) {
+    console.log('No valid emotion scores found')
+    return 40 // Baseline score
+  }
   
   // Average emotion confidence
   const avgEmotionScore = data.emotions.reduce((sum, e) => sum + e.score, 0) / data.emotions.length
@@ -263,7 +404,14 @@ function calculateConfidenceScore(data: InterviewData): number {
 }
 
 function calculateTechnicalScore(data: InterviewData): number {
-  const text = data.transcription.toLowerCase()
+  const transcriptionText = data.transcription?.trim() || ''
+  
+  if (!transcriptionText) {
+    console.log('No transcription available for technical scoring')
+    return 0
+  }
+  
+  const text = transcriptionText.toLowerCase()
   
   // Technical keywords and concepts
   const technicalKeywords = [
@@ -300,7 +448,14 @@ function calculateTechnicalScore(data: InterviewData): number {
 }
 
 function calculateProblemSolvingScore(data: InterviewData): number {
-  const text = data.transcription.toLowerCase()
+  const transcriptionText = data.transcription?.trim() || ''
+  
+  if (!transcriptionText) {
+    console.log('No transcription available for problem-solving scoring')
+    return 0
+  }
+  
+  const text = transcriptionText.toLowerCase()
   
   const problemSolvingIndicators = [
     'challenge', 'problem', 'solution', 'approach', 'analyze', 'evaluate',
@@ -331,7 +486,19 @@ function calculateProblemSolvingScore(data: InterviewData): number {
 }
 
 function calculateEmotionalIntelligenceScore(data: InterviewData): number {
-  if (data.emotions.length === 0) return 50
+  const emotions = data.emotions || []
+  
+  if (emotions.length === 0) {
+    console.log('No emotion data available for EI scoring')
+    return 50 // Neutral baseline
+  }
+  
+  const validEmotions = emotions.filter(e => e && typeof e.score === 'number')
+  
+  if (validEmotions.length === 0) {
+    console.log('No valid emotions for EI scoring')
+    return 40 // Lower baseline
+  }
   
   // Emotional stability (less variation is better)
   const emotionScores = data.emotions.map(e => e.score)
@@ -350,7 +517,14 @@ function calculateEmotionalIntelligenceScore(data: InterviewData): number {
 }
 
 function calculateArticulationScore(data: InterviewData): number {
-  const text = data.transcription
+  const transcriptionText = data.transcription?.trim() || ''
+  
+  if (!transcriptionText) {
+    console.log('No transcription available for articulation scoring')
+    return 0
+  }
+  
+  const text = transcriptionText
   const words = text.split(' ').filter(w => w.length > 0)
   
   if (words.length === 0) return 0
@@ -381,32 +555,73 @@ function calculateArticulationScore(data: InterviewData): number {
 function generateInsights(data: InterviewData, scores: any): string[] {
   const insights = []
   
+  // Calculate more detailed statistics
+  const words = data.transcription.split(/\s+/).filter(w => w.length > 1)
+  const sentences = data.transcription.split(/[.!?]+/).filter(s => s.trim().length > 5)
+  const avgWordsPerSentence = sentences.length > 0 ? Math.round(words.length / sentences.length) : 0
+  const speakingRate = data.duration > 0 ? Math.round((words.length / data.duration) * 60) : 0
+  
+  // Communication insights with specific metrics
   if (scores.communication >= 80) {
-    insights.push("Excellent communication skills demonstrated with clear, well-structured responses")
+    insights.push(`Excellent communication skills: ${words.length} well-chosen words with strong sentence structure (avg ${avgWordsPerSentence} words/sentence)`)
   } else if (scores.communication >= 60) {
-    insights.push("Good communication with room for more detailed explanations")
+    insights.push(`Good communication foundation with ${words.length} words spoken, but could benefit from more detailed explanations`)
   } else {
-    insights.push("Communication could be improved with more structured and detailed responses")
+    insights.push(`Communication needs improvement: only ${words.length} words spoken with average sentence length of ${avgWordsPerSentence} words`)
   }
   
-  if (scores.confidence >= 80) {
-    insights.push("High confidence level maintained throughout the interview")
-  } else if (scores.confidence >= 60) {
-    insights.push("Moderate confidence with some nervousness detected")
-  } else {
-    insights.push("Low confidence detected - consider additional preparation and practice")
+  // Speaking pace analysis
+  if (speakingRate > 0) {
+    if (speakingRate >= 120 && speakingRate <= 160) {
+      insights.push(`Optimal speaking pace at ${speakingRate} words per minute - clear and easy to follow`)
+    } else if (speakingRate > 160) {
+      insights.push(`Speaking pace is fast at ${speakingRate} words per minute - consider slowing down for clarity`)
+    } else if (speakingRate < 120 && speakingRate > 0) {
+      insights.push(`Speaking pace is slow at ${speakingRate} words per minute - could indicate hesitation or nervousness`)
+    }
   }
+  
+  // Confidence insights with emotion data
+  if (data.emotions.length > 0) {
+    const avgEmotionScore = Math.round((data.emotions.reduce((sum, e) => sum + e.score, 0) / data.emotions.length) * 100)
+    if (scores.confidence >= 80) {
+      insights.push(`High confidence level demonstrated with ${avgEmotionScore}% average emotional stability across ${data.emotions.length} emotion readings`)
+    } else if (scores.confidence >= 60) {
+      insights.push(`Moderate confidence with ${avgEmotionScore}% emotional stability - some nervousness detected in ${data.emotions.length} readings`)
+    } else {
+      insights.push(`Lower confidence detected with ${avgEmotionScore}% emotional stability across ${data.emotions.length} readings - practice and preparation recommended`)
+    }
+  }
+  
+  // Technical knowledge insights
+  const technicalTerms = ['project', 'system', 'development', 'technology', 'framework', 'database', 'api', 'solution', 'implementation']
+  const foundTechnical = technicalTerms.filter(term => data.transcription.toLowerCase().includes(term))
   
   if (scores.technicalKnowledge >= 70) {
-    insights.push("Strong technical vocabulary and industry knowledge demonstrated")
+    insights.push(`Strong technical knowledge evidenced by use of ${foundTechnical.length} industry terms: ${foundTechnical.slice(0, 3).join(', ')}${foundTechnical.length > 3 ? '...' : ''}`)
+  } else if (foundTechnical.length > 0) {
+    insights.push(`Some technical knowledge shown with ${foundTechnical.length} relevant terms, but could demonstrate deeper expertise`)
   } else {
-    insights.push("Technical knowledge could be enhanced with more specific examples and terminology")
+    insights.push(`Limited technical vocabulary detected - consider incorporating more industry-specific terminology and examples`)
   }
   
-  if (data.duration < 180) {
-    insights.push("Interview responses were brief - consider providing more detailed examples")
-  } else if (data.duration > 600) {
-    insights.push("Responses were comprehensive - ensure to stay concise and focused")
+  // Response length analysis
+  if (data.duration < 120) {
+    insights.push(`Brief response duration (${Math.floor(data.duration / 60)}m ${data.duration % 60}s) - consider providing more comprehensive examples and details`)
+  } else if (data.duration > 300) {
+    insights.push(`Comprehensive response duration (${Math.floor(data.duration / 60)}m ${data.duration % 60}s) - excellent detail but ensure key points are clear`)
+  } else {
+    insights.push(`Good response length (${Math.floor(data.duration / 60)}m ${data.duration % 60}s) - appropriate balance of detail and conciseness`)
+  }
+  
+  // Problem-solving language analysis
+  const problemSolvingTerms = ['challenge', 'problem', 'solution', 'approach', 'analyze', 'strategy', 'method']
+  const foundProblemSolving = problemSolvingTerms.filter(term => data.transcription.toLowerCase().includes(term))
+  
+  if (foundProblemSolving.length >= 3) {
+    insights.push(`Strong problem-solving communication demonstrated through ${foundProblemSolving.length} relevant terms`)
+  } else if (foundProblemSolving.length > 0) {
+    insights.push(`Some problem-solving language present but could elaborate more on analytical thinking processes`)
   }
   
   return insights
