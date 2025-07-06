@@ -97,9 +97,9 @@ async function generateDynamicScore(data: InterviewData): Promise<ScoringResult>
     
     console.log(`Scoring Analysis - Words: ${wordCount}, Emotions: ${validEmotions.length}, Duration: ${data.duration}`)
     
-    // If absolutely no data, return fallback scoring
-    if (wordCount === 0 && validEmotions.length === 0 && (!data.duration || data.duration === 0)) {
-      console.log('No meaningful data for scoring, using zero fallback')
+    // If absolutely no meaningful data, return early to prevent unnecessary processing
+    if (wordCount === 0 && validEmotions.length < 3 && (!data.duration || data.duration < 30)) {
+      console.log('Insufficient data for meaningful scoring, returning fallback')
       return getFallbackScoring(data)
     }
     

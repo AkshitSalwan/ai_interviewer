@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import InterviewTimer from './InterviewTimer'
 import EndInterviewModal from './EndInterviewModal'
 import EmotionAnalysis from './EmotionAnalysis'
@@ -68,6 +68,15 @@ export default function InterviewRoom() {
   
   const videoContainerRef = useRef<HTMLDivElement>(null)
   const zegoRef = useRef<any>(null)
+
+  // Memoize EmotionAnalysis component to prevent unnecessary re-renders
+  const emotionAnalysisComponent = useMemo(() => (
+    <EmotionAnalysis 
+      emotions={interviewState.emotions || []} 
+      currentScore={0} 
+      isInterviewActive={interviewState.isRecording}
+    />
+  ), [interviewState.emotions, interviewState.isRecording])
 
   // Initialize Video
   useEffect(() => {
@@ -148,9 +157,11 @@ export default function InterviewRoom() {
     if (interviewState.isRecording) {
       const updateScore = async () => {
         const now = Date.now()
-        // Update score every 30 seconds to avoid too many API calls
-        if (now - interviewState.lastScoreUpdate > 30000 && 
-            (interviewState.transcription.length > 50 || interviewState.emotions.length > 5)) {
+        // Only update score if we have meaningful transcription data and haven't updated recently
+        const wordCount = interviewState.transcription.split(' ').filter(word => word.trim().length > 0).length
+        if (now - interviewState.lastScoreUpdate > 60000 && 
+            wordCount > 20 && 
+            interviewState.transcription.length > 100) {
           
           try {
             const response = await fetch('/api/score-interview', {
@@ -172,21 +183,22 @@ export default function InterviewRoom() {
                 currentScore: result.overallScore,
                 lastScoreUpdate: now
               }))
+            }            } catch (error) {
+              console.error('Error updating real-time score:', error)
+              // Only calculate fallback score if we have actual transcription data
+              if (wordCount > 10) {
+                const basicScore = calculateBasicScore(interviewState.transcription, interviewState.emotions, interviewState.duration)
+                setInterviewState(prev => ({
+                  ...prev,
+                  currentScore: basicScore,
+                  lastScoreUpdate: now
+                }))
+              }
             }
-          } catch (error) {
-            console.error('Error updating real-time score:', error)
-            // Calculate a basic real-time score as fallback
-            const basicScore = calculateBasicScore(interviewState.transcription, interviewState.emotions, interviewState.duration)
-            setInterviewState(prev => ({
-              ...prev,
-              currentScore: basicScore,
-              lastScoreUpdate: now
-            }))
-          }
         }
       }
 
-      const interval = setInterval(updateScore, 10000) // Check every 10 seconds
+      const interval = setInterval(updateScore, 30000) // Check every 30 seconds instead of 10
       return () => clearInterval(interval)
     }
   }, [interviewState.isRecording, interviewState.transcription, interviewState.emotions, interviewState.duration, interviewState.lastScoreUpdate])
@@ -222,20 +234,35 @@ export default function InterviewRoom() {
     }
   }, [interviewState.isRecording])
 
-  // Start interview recording and transcription
-  useEffect(() => {
-    if (interviewState.isRecording) {
-      startTranscription()
-      startEmotionAnalysis()
-    }
-  }, [interviewState.isRecording])
-
   // Track last transcription for deduplication
   const lastTranscriptionRef = useRef<string>('');
+  const transcriptionStartedRef = useRef<boolean>(false);
   
-  const startTranscription = async () => {
+  const startTranscription = useCallback(async () => {
+    // Prevent multiple simultaneous starts
+    if (transcriptionStartedRef.current) {
+      console.log('Transcription already started, skipping...');
+      return;
+    }
+    
+    transcriptionStartedRef.current = true;
+    
     try {
       console.log('Initializing real-time transcription...')
+      
+      // Check microphone permissions first
+      try {
+        const permissionStatus = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+        console.log('Microphone permission status:', permissionStatus.state);
+        
+        if (permissionStatus.state === 'denied') {
+          console.error('Microphone permission denied');
+          alert('Microphone permission is required for voice transcription. Please allow microphone access and reload the page.');
+          return;
+        }
+      } catch (permErr) {
+        console.log('Could not check microphone permissions:', permErr);
+      }
       
       // Test connection first
       const isValid = await transcriptionService.testConnection()
@@ -246,15 +273,34 @@ export default function InterviewRoom() {
       // Reset the last transcription reference
       lastTranscriptionRef.current = '';
       
+      // Re-enable echo detection but make it less aggressive
+      transcriptionService.setEchoPreventionEnabled(true);
+      
       // Add a state variable to track silence periods
       let lastSpeechTimestamp = Date.now();
       let silenceTimeout: NodeJS.Timeout | null = null;
       
       const success = await transcriptionService.startTranscription((data: TranscriptionData) => {
+        console.log('Raw transcription data received:', data);
+        
+        // Process both interim and final transcriptions for better user feedback
+        if (data.transcript.length > 0) {
+          const newTranscript = data.transcript.trim();
+          console.log('Processing speech:', newTranscript, 'Final:', data.is_final);
+          
+          // For interim results, just log them to see if speech is being detected
+          if (!data.is_final) {
+            console.log('📝 Interim speech detected:', newTranscript);
+            return; // Don't process interim results for now
+          }
+          
+          console.log('✅ Final speech detected:', newTranscript);
+        }
+        
         // Only process final transcriptions that have meaningful content
         if (data.is_final && data.transcript.length > 3) {
           const newTranscript = data.transcript.trim();
-          console.log('Speech detected:', newTranscript);
+          console.log('Processing final speech:', newTranscript);
           
           // Update the last speech timestamp
           lastSpeechTimestamp = Date.now();
@@ -283,6 +329,9 @@ export default function InterviewRoom() {
             ...prev,
             transcription: prev.transcription + (prev.transcription ? ' ' : '') + normalizedTranscript
           }));
+          
+          console.log('Transcription updated:', normalizedTranscript);
+          console.log('Total transcription length:', (interviewState.transcription + ' ' + normalizedTranscript).length);
           
           // Enhanced silence detection system with three levels of response:
           // 1. Immediate response if transcription is definitely complete (ends with punctuation or finality phrases)
@@ -351,12 +400,13 @@ export default function InterviewRoom() {
       
     } catch (error) {
       console.error('Error starting transcription:', error)
+      transcriptionStartedRef.current = false;
       setInterviewState(prev => ({
         ...prev,
         transcription: ''
       }))
     }
-  }
+  }, [lastTranscriptionRef, interviewState.isAiSpeaking])
 
   const startEmotionAnalysis = async () => {
     try {
@@ -383,7 +433,25 @@ export default function InterviewRoom() {
     }
   }
 
-  const generateAIResponse = async (userInput: string) => {
+  // Start interview recording and transcription
+  useEffect(() => {
+    if (interviewState.isRecording) {
+      startTranscription()
+      startEmotionAnalysis()
+    } else {
+      // Reset the transcription started flag when not recording
+      transcriptionStartedRef.current = false;
+    }
+    
+    return () => {
+      // Cleanup when component unmounts or recording stops
+      if (!interviewState.isRecording) {
+        transcriptionStartedRef.current = false;
+      }
+    }
+  }, [interviewState.isRecording, startTranscription])
+
+  const generateAIResponse = useCallback(async (userInput: string) => {
     try {
       // Prevent multiple AI responses at once
       if (interviewState.isAiSpeaking) {
@@ -433,16 +501,29 @@ export default function InterviewRoom() {
       // If we didn't get a valid response, try again or provide a fallback
       if (!aiText || aiText.trim() === '') {
         console.error('Empty AI response received')
-        setInterviewState(prev => ({ ...prev, isAiSpeaking: false }))
         
         // Use a simple fallback response
         const fallbackResponse = "I didn't catch that. Could you please elaborate on your answer?";
+        
+        // Update the AI response in the state
+        setInterviewState(prev => ({ 
+          ...prev, 
+          isAiSpeaking: false,
+          aiResponse: fallbackResponse
+        }))
+        
         speakAiResponse(fallbackResponse)
         setConversationHistory(prev => [...prev, `exchequer: ${fallbackResponse}`])
         return
       }
       
       console.log('AI Response:', aiText)
+      
+      // Update the AI response in the state so it shows in the text box
+      setInterviewState(prev => ({
+        ...prev,
+        aiResponse: aiText
+      }))
       
       // Speak the AI response
       speakAiResponse(aiText)
@@ -459,9 +540,9 @@ export default function InterviewRoom() {
         console.log('Transcription resumed after error');
       })
     }
-  }
+  }, [interviewState.isAiSpeaking, conversationHistory, preInterview])
 
-  const speakAiResponse = async (text: string) => {
+  const speakAiResponse = useCallback(async (text: string) => {
     try {
       // First, cancel any ongoing speech to avoid overlapping
       if ('speechSynthesis' in window) {
@@ -471,47 +552,12 @@ export default function InterviewRoom() {
       // Ensure transcription is completely stopped while AI is speaking
       transcriptionService.stopTranscription()
       
-      // Longer delay to ensure microphone is fully stopped before speaking
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Set AI speech context for enhanced echo detection
+      transcriptionService.setAiSpeechContext(text);
       
-      // If we have access to the media stream, completely disable the microphone
-      // This helps prevent echo by ensuring the AI speech isn't picked up by the mic
-      const audioTracks = zegoRef.current?.stream?.getAudioTracks() || [];
-      if (audioTracks.length > 0) {
-        const originalMicState = audioTracks[0].enabled;
-        
-        // Completely disable the microphone during AI speech
-        audioTracks[0].enabled = false;
-        
-        // Disable audio processing temporarily to further reduce echo
-        try {
-          if (audioTracks[0].getConstraints) {
-            const constraints = audioTracks[0].getConstraints();
-            if (constraints.advanced) {
-              // Attempt to modify constraints if supported
-              audioTracks[0].applyConstraints({
-                ...constraints,
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: false // Disable auto gain during speech
-              }).catch((e: Error) => console.log('Could not apply constraints:', e));
-            }
-          }
-        } catch (constraintError) {
-          console.log('Audio constraint modification not supported');
-        }
-        
-        // Remember to restore mic state when speech ends with a delay
-        setTimeout(() => {
-          if (zegoRef.current?.stream) {
-            const audioTrack = zegoRef.current.stream.getAudioTracks()[0];
-            if (audioTrack) {
-              audioTrack.enabled = originalMicState;
-            }
-          }
-        }, 2000); // Longer delay before restoring mic to ensure speech is completely done
-      }
-
+      // Longer delay to ensure microphone is fully stopped before speaking
+      await new Promise(resolve => setTimeout(resolve, 700));
+      
       // Ensure we're in the AI speaking state
       setInterviewState(prev => ({
         ...prev,
@@ -532,10 +578,10 @@ export default function InterviewRoom() {
         utterance.voice = selectedVoice;
       }
 
-      // Set consistent voice properties for optimal quality
-      utterance.rate = 0.93;  // Slightly slower rate for clarity
-      utterance.pitch = 1.05; // Slightly higher pitch for female voice characteristics
-      utterance.volume = 0.65; // Lower volume to minimize echo
+      // Set consistent voice properties for optimal quality and reduced echo
+      utterance.rate = 0.9;   // Slightly slower rate for clarity
+      utterance.pitch = 1.0;  // Normal pitch
+      utterance.volume = 0.6; // Lower volume to minimize echo pickup
       
       // Return a promise that resolves when the speech is done
       return new Promise<void>((resolve) => {
@@ -548,77 +594,14 @@ export default function InterviewRoom() {
             isAiSpeaking: false
           }))
           
-          // Resume transcription with improved echo handling and faster speech recognition
-          // Add a slightly longer delay (300ms) before resuming transcription 
-          // This helps to:
-          // 1. Give enough time for any echo to subside
-          // 2. Allow the microphone to fully engage again
-          // 3. Prevent false detection of AI's voice as user input
+          // Enhanced delay before resuming transcription to prevent echo
           setTimeout(() => {
-            console.log('Resuming transcription after AI speech with echo protection');
+            console.log('Resuming transcription with enhanced echo protection');
             
-            // Clear the last transcription reference to prevent false duplicates
-            lastTranscriptionRef.current = '';
-            
-            // Store the AI's last words to help with echo detection
-            const aiLastText = text;
-            
-            // This timestamp marks when transcription resumes
-            const transcriptionResumeTime = Date.now();
-            
-            // Start transcription with special handling for the transition period
+            // Resume transcription with the enhanced echo detection
             transcriptionService.startTranscription((data: TranscriptionData) => {
-              // Only process final transcriptions that have meaningful content
               if (data.is_final && data.transcript.length > 3) {
                 const newTranscript = data.transcript.trim();
-                const timeSinceResume = Date.now() - transcriptionResumeTime;
-                
-                // Aggressive echo detection for transcriptions that arrive soon after AI speech
-                // Reduce the window for possible echo detection to 1500ms (1.5 seconds)
-                if (timeSinceResume < 1500) {
-                  // For immediate transcriptions, check for AI speech fragments
-                  const aiWords = aiLastText.toLowerCase().split(/\s+/)
-                                  .filter(w => w.length > 2) // Consider shorter words too
-                                  .map(w => w.replace(/[.,!?;:]/g, ''));
-                  
-                  const transcriptWords = newTranscript.toLowerCase().split(/\s+/)
-                                         .map(w => w.replace(/[.,!?;:]/g, ''));
-                  
-                  // More sophisticated echo detection:
-                  
-                  // 1. Count exact matching words
-                  const matchCount = aiWords.filter(word => transcriptWords.includes(word)).length;
-                  
-                  // 2. Calculate match ratio (what percentage of transcript words match AI words)
-                  const matchRatio = transcriptWords.length > 0 ? matchCount / transcriptWords.length : 0;
-                  
-                  // 3. Check for sequence similarity by looking for consecutive matches
-                  let sequenceDetected = false;
-                  if (transcriptWords.length >= 2) {
-                    for (let i = 0; i < transcriptWords.length - 1; i++) {
-                      const pair = transcriptWords[i] + " " + transcriptWords[i+1];
-                      if (aiLastText.toLowerCase().includes(pair)) {
-                        sequenceDetected = true;
-                        break;
-                      }
-                    }
-                  }
-                  
-                  // Detect echo if:
-                  // - More than 1 significant word matches OR
-                  // - Any match in a very short transcript OR
-                  // - High match ratio (>30%) OR
-                  // - Sequence of words detected
-                  if (matchCount > 1 || 
-                      (matchCount > 0 && transcriptWords.length < 4) || 
-                      matchRatio > 0.3 ||
-                      sequenceDetected) {
-                    console.log(`Echo detected (${matchCount}/${transcriptWords.length} words, ratio: ${matchRatio.toFixed(2)}, sequence: ${sequenceDetected}), skipping:`, newTranscript);
-                    return;
-                  }
-                  
-                  console.log('Early transcription passed echo check:', newTranscript);
-                }
                 
                 // Normal processing for non-echo speech
                 const normalizedTranscript = removeStuttering(newTranscript);
@@ -638,75 +621,66 @@ export default function InterviewRoom() {
                   transcription: prev.transcription + (prev.transcription ? ' ' : '') + normalizedTranscript
                 }));
                 
-                // For transcriptions after AI speech, we want quick but natural response time
-                // Assume the user is likely responding to the AI's question
+                // Enhanced response timing based on content
                 if (normalizedTranscript.length > 8 && !interviewState.isAiSpeaking) {
-                  // Check for a complete statement
                   const isComplete = /[.!?]$/.test(normalizedTranscript) || 
                                      normalizedTranscript.length > 25 ||
                                      /(?:thank you|that's all|that is all|done|finished)/i.test(normalizedTranscript);
-                                    
-                  // If it seems complete, respond with a short delay, otherwise set a longer timeout
+                  
                   if (isComplete) {
-                    console.log('Complete response after AI speech, triggering AI response');
+                    console.log('Complete response detected, triggering AI response');
                     setTimeout(() => {
                       if (!interviewState.isAiSpeaking) {
                         generateAIResponse(normalizedTranscript);
                       }
-                    }, 500);
-                  } else {
-                    // Set a moderate silence timeout for more natural conversation
+                    }, 800);
+                  } else if (normalizedTranscript.length > 15) {
+                    console.log('Substantial partial response, preparing for potential AI trigger');
                     setTimeout(() => {
                       if (!interviewState.isAiSpeaking) {
-                        console.log('Follow-up to AI question, triggering AI response');
                         generateAIResponse(normalizedTranscript);
                       }
-                    }, 1200);
+                    }, 1500);
                   }
                 }
               }
             });
-          }, 800) // Increased delay for better microphone recovery after AI speaks
-          
-          resolve()
-        }
+            resolve();
+          }, 2000); // Increased delay before resuming transcription
+        };
         
-        utterance.onerror = (event) => {
-          console.error('Speech synthesis error:', event)
+        utterance.onerror = (event: any) => {
+          console.error('Speech synthesis error:', event.error);
+          setInterviewState(prev => ({ ...prev, isAiSpeaking: false }));
           
-          // Update the state to indicate AI is done speaking
-          setInterviewState(prev => ({
-            ...prev,
-            isAiSpeaking: false
-          }))
-          
-          // Resume transcription even if there was an error
-          transcriptionService.startTranscription((data: TranscriptionData) => {
-            // Simple callback to restart transcription
-            console.log('Transcription resumed after TTS error')
-          })
-          
-          resolve() // Resolve anyway to continue the flow
-        }
+          // Resume transcription even on error
+          setTimeout(() => {
+            transcriptionService.startTranscription((data: TranscriptionData) => {
+              console.log('Transcription resumed after TTS error');
+            });
+            resolve();
+          }, 1000);
+        };
         
-        // Start speaking
-        window.speechSynthesis.speak(utterance)
-      })
+        // Clear any existing speech and speak
+        speechSynthesis.cancel();
+        speechSynthesis.speak(utterance);
+      });
     } catch (error) {
-      console.error('Error in speech synthesis:', error)
+      console.error('Error in speech synthesis:', error);
       
       // Always ensure we reset the AI speaking state on error
       setInterviewState(prev => ({
         ...prev,
         isAiSpeaking: false
-      }))
+      }));
       
       // And resume transcription
       transcriptionService.startTranscription((data: TranscriptionData) => {
-        console.log('Transcription resumed after TTS error handling')
-      })
+        console.log('Transcription resumed after TTS error handling');
+      });
     }
-  }
+  }, [interviewState.isAiSpeaking, lastTranscriptionRef, generateAIResponse])
 
   const toggleMute = () => {
     if (zegoRef.current?.stream) {
@@ -1217,11 +1191,7 @@ export default function InterviewRoom() {
 
             {/* Emotion Analysis */}
             <div className="p-4 border-b border-gray-700">
-              <EmotionAnalysis 
-                emotions={interviewState.emotions || []} 
-                currentScore={0} 
-                isInterviewActive={interviewState.isRecording}
-              />
+              {emotionAnalysisComponent}
             </div>
 
             {/* AI Response */}
@@ -1231,15 +1201,23 @@ export default function InterviewRoom() {
                   <h3 className="font-semibold">exchequer (AI Interviewer)</h3>
                   <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
                 </div>
-                {interviewState.isAiSpeaking && (
+                {interviewState.isAiSpeaking ? (
                   <div className="flex items-center space-x-2 text-sm text-blue-400">
                     <div className="animate-pulse">🗣️</div>
-                    <span>exchequer is thinking...</span>
+                    <span>exchequer is speaking...</span>
                   </div>
-                )}
+                ) : interviewState.isRecording ? (
+                  <div className="flex items-center space-x-2 text-sm text-green-400">
+                    <div className="animate-pulse">👂</div>
+                    <span>Waiting for your response...</span>
+                  </div>
+                ) : null}
               </div>
-              <div className="bg-gray-900 rounded p-3 flex-1 overflow-y-auto text-sm mb-4" style={{ minHeight: '150px', maxHeight: '250px' }}>
-                {interviewState.aiResponse || 'Welcome! I\'m exchequer, your AI interviewer. Please click "Start Interview" to begin our conversation.'}
+              <div className="bg-gray-900 rounded p-3 flex-1 overflow-y-auto text-sm mb-4 border-l-4 border-blue-500" style={{ minHeight: '150px', maxHeight: '250px' }}>
+                <div className="text-blue-400 text-xs mb-2 uppercase tracking-wide">📢 AI Interviewer says:</div>
+                <div className="text-gray-100 leading-relaxed">
+                  {interviewState.aiResponse || 'Welcome! I\'m exchequer, your AI interviewer. Please click "Start Interview" to begin our conversation.'}
+                </div>
               </div>
               
               {/* Manual Input for Testing */}
